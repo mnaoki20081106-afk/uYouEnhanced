@@ -16,6 +16,14 @@
     }
     return orig;
 }
+// Fix ASWebAuthenticationSession crash: iOS calls -bundleIdentifier directly,
+// bypassing -infoDictionary, so we need to hook it separately.
+- (NSString *)bundleIdentifier {
+    if ([self isEqual:NSBundle.mainBundle]) {
+        return @"com.google.ios.youtube";
+    }
+    return %orig;
+}
 %end
 %end
 
