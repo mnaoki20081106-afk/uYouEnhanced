@@ -205,7 +205,10 @@ mode or the retry cache makes them fail.
 
 The whole tree is also compile-checked against the real iOS SDK and the real
 `Tweaks/YouTubeHeader`, after running each `.xm` through `logos.pl` — the same
-front end theos uses.
+front end theos uses. **Use `-Werror -Wvla -Wgnu-folding-constant`**: theos
+builds with `-Werror`, and a `static const size_t` used as an array bound is a
+warning on Apple clang (`-Wgnu-folding-constant`) but only surfaces as `-Wvla`
+elsewhere — that exact difference let a CI-breaking VLA through once.
 
 ## 10. On-device test plan
 

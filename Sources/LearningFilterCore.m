@@ -259,7 +259,10 @@ BOOL LFShouldHideInfo(NSDictionary *info) {
 // below only converts its results into the Foundation types used above.
 
 static NSUInteger const kLFMaxScannedBytes = 262144;
-static size_t const kLFMaxIds = 64;
+
+// An enum, not a `const size_t`: in C the latter is not a constant expression,
+// so the stack buffers below would become variable-length arrays.
+enum { kLFMaxIds = 64 };
 
 static NSSet<NSString *> *LFChannelIdSetFromBytes(const uint8_t *bytes, size_t length) {
     LFScanChannelId found[kLFMaxIds];
