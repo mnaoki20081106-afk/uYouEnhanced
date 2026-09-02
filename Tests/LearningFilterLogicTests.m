@@ -43,6 +43,7 @@ static void resetDefaults(void) {
     for (NSString *key in @[kLFStoredChannels, kLFLastSyncDate, kLFBoundAccount])
         [defaults removeObjectForKey:key];
     [[LFSubscriptionStore sharedStore] reset];
+    LFSetOwnChannel(nil);
 }
 
 /// Stands in for a YTIElementRenderer whose payload is filled in lazily.
@@ -71,15 +72,17 @@ static void testPayloadExtraction(void) {
     check([[info objectForKey:LFInfoChannelIds] count] == 1, @"lockup has exactly one channel id");
     check([[info objectForKey:LFInfoChannelIds] containsObject:REAL_ID], @"lockup channel id value");
     check(![[info objectForKey:LFInfoIsShort] boolValue], @"lockup is not a Short");
-    check(LFInfoIsSingleVideoLockup(info), @"lockup counts as a single-video lockup");
+    check([[info objectForKey:LFInfoHasStrongChannelId] boolValue], @"lockup channel id is protobuf-prefixed");
+    check(LFInfoCarriesContent(info), @"lockup carries content");
 
-    // A shelf carries several videos and must not be treated as one lockup.
+    // A shelf carries several videos, and all of their channels.
     NSMutableData *shelf = [[LockupPayload(REAL_ID, @"dQw4w9WgXcQ") mutableCopy] copy];
     NSMutableData *combined = [NSMutableData dataWithData:shelf];
     [combined appendData:LockupPayload(OTHER_ID, @"AbCdEfGhIjK")];
     NSDictionary *shelfInfo = LFInfoFromData(combined);
     check([[shelfInfo objectForKey:LFInfoVideoIds] count] == 2, @"shelf reports both videos");
-    check(!LFInfoIsSingleVideoLockup(shelfInfo), @"shelf is not a single lockup");
+    check([[shelfInfo objectForKey:LFInfoChannelIds] count] == 2, @"shelf reports both channels");
+    check(LFInfoCarriesContent(shelfInfo), @"shelf carries content");
 
     // Shorts detection through the /shorts/ path.
     NSData *shorts = DataFromString(@"id.eml.shorts_video_cell yt://www.youtube.com/shorts/AbCdEfGhIjK");
@@ -177,6 +180,15 @@ static void testDecisions(void) {
     check(!LFIsSubscribedToChannel(THIRD_ID), @"isSubscribedToChannel false for an unsubscribed id");
     check(LFIsAllowedChannel(REAL_ID) == LFIsSubscribedToChannel(REAL_ID), @"allowed == subscribed");
 
+    // The account's own channel is allowed without being subscribed to itself.
+    check(!LFIsAllowedChannel(THIRD_ID), @"an unrelated channel is not allowed");
+    LFSetOwnChannel(THIRD_ID);
+    check(LFIsOwnChannel(THIRD_ID), @"the bound page id is recognised as the user's own channel");
+    check(LFIsAllowedChannel(THIRD_ID), @"the user's own channel is allowed");
+    check(!LFIsSubscribedToChannel(THIRD_ID), @"…without being in the subscription list");
+    LFSetOwnChannel(nil);
+    check(!LFIsAllowedChannel(THIRD_ID), @"releasing the account drops that allowance");
+
     NSDictionary *allowed = LFInfoFromData(LockupPayload(REAL_ID, @"dQw4w9WgXcQ"));
     NSDictionary *denied = LFInfoFromData(LockupPayload(THIRD_ID, @"AbCdEfGhIjK"));
 
@@ -240,6 +252,51 @@ static void testLazyPayloadRetry(void) {
     check(renderer->calls == 2, @"complete answer is not rescanned");
 }
 
+// "Explore other channels" and "from related searches" are single elements that
+// carry several items — and sometimes channels with no video at all. Both used
+// to slip past the filter.
+static void testShelvesAndChannelCards(void) {
+    resetDefaults();
+    [[LFSubscriptionStore sharedStore] replaceWithChannels:@[@{@"id": REAL_ID, @"name": @"Math Channel A"}]];
+
+    // A shelf where nothing is subscribed goes as a whole.
+    NSMutableData *foreignShelf = [NSMutableData dataWithData:LockupPayload(OTHER_ID, @"dQw4w9WgXcQ")];
+    [foreignShelf appendData:LockupPayload(THIRD_ID, @"AbCdEfGhIjK")];
+    NSDictionary *foreignInfo = LFInfoFromData(foreignShelf);
+    check([[foreignInfo objectForKey:LFInfoVideoIds] count] == 2, @"foreign shelf has two videos");
+    check(LFDecisionForInfo(foreignInfo) == LFDecisionHide, @"a shelf with no subscribed channel is hidden");
+
+    // One subscribed channel keeps the shelf; its items are judged on their own.
+    NSMutableData *mixedShelf = [NSMutableData dataWithData:LockupPayload(REAL_ID, @"dQw4w9WgXcQ")];
+    [mixedShelf appendData:LockupPayload(THIRD_ID, @"AbCdEfGhIjK")];
+    check(LFDecisionForInfo(LFInfoFromData(mixedShelf)) == LFDecisionAllow,
+          @"a shelf keeping one subscribed channel survives");
+
+    // A channel card: a channel id and no video at all.
+    NSMutableData *card = [NSMutableData data];
+    [card appendData:DataFromString(@"\n\x12" @"eml.channel_lockup")];
+    uint8_t endpoint[] = {0x1a, 0x18};
+    [card appendBytes:endpoint length:2];
+    [card appendData:DataFromString(THIRD_ID)];
+    NSDictionary *cardInfo = LFInfoFromData(card);
+    check([[cardInfo objectForKey:LFInfoVideoIds] count] == 0, @"channel card names no video");
+    check(LFInfoCarriesContent(cardInfo), @"a channel card counts as content");
+    check(LFDecisionForInfo(cardInfo) == LFDecisionHide, @"an unsubscribed channel card is hidden");
+
+    NSMutableData *ownCard = [NSMutableData data];
+    [ownCard appendData:DataFromString(@"\n\x12" @"eml.channel_lockup")];
+    [ownCard appendBytes:endpoint length:2];
+    [ownCard appendData:DataFromString(REAL_ID)];
+    check(LFDecisionForInfo(LFInfoFromData(ownCard)) == LFDecisionAllow, @"a subscribed channel card stays");
+
+    // Chrome: a channel id that is only a chance hit inside a base64 token has
+    // no protobuf prefix, and must never be enough to hide something.
+    NSData *chrome = DataFromString([NSString stringWithFormat:@"{\"token\":\"%@\"}", THIRD_ID]);
+    NSDictionary *chromeInfo = LFInfoFromData(chrome);
+    check(![[chromeInfo objectForKey:LFInfoHasStrongChannelId] boolValue], @"json id is not protobuf-prefixed");
+    check(!LFInfoCarriesContent(chromeInfo), @"an unprefixed id alone is not content");
+}
+
 static void testControlIdentifiers(void) {
     check(LFIsSubscriptionMutationURL([NSURL URLWithString:@"https://youtubei.googleapis.com/youtubei/v1/subscription/subscribe?key=x"]),
           @"subscribe endpoint recognised");
@@ -281,6 +338,7 @@ int main(void) {
         testFilteringGate();
         testDecisions();
         testLazyPayloadRetry();
+        testShelvesAndChannelCards();
         testControlIdentifiers();
         testChannelIdsInJSON();
         resetDefaults();

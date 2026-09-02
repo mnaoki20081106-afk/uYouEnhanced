@@ -503,8 +503,10 @@ static NSString *const kLFBoundAuthUserKey = @"authUser";
         if ([stored isKindOfClass:[NSDictionary class]]) {
             id pageId = stored[kLFBoundPageIdKey];
             id authUser = stored[kLFBoundAuthUserKey];
-            if ([pageId isKindOfClass:[NSString class]])
+            if ([pageId isKindOfClass:[NSString class]]) {
                 _boundPageId = pageId;
+                LFSetOwnChannel(pageId);
+            }
             if ([authUser isKindOfClass:[NSString class]])
                 _boundAuthUser = authUser;
         }
@@ -563,6 +565,7 @@ static NSString *const kLFBoundAuthUserKey = @"authUser";
         // is already bound, otherwise a second account would rebind the guard.
         if (pageId.length > 0 && self.boundPageId.length == 0) {
             self.boundPageId = pageId;
+            LFSetOwnChannel(pageId);
             changed = YES;
         }
         if (authUser.length > 0 && self.boundAuthUser.length == 0) {
@@ -605,6 +608,7 @@ static NSString *const kLFBoundAuthUserKey = @"authUser";
         self.signedOutStreak = 0;
         [self persist];
     }
+    LFSetOwnChannel(nil);
     // The whitelist belonged to that account; without it Whitelist Mode has no
     // input and must go inert rather than hide everything (spec §9).
     [[LFSubscriptionStore sharedStore] reset];

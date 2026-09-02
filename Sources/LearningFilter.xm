@@ -38,17 +38,28 @@
 - (id)makeContentModelForEntry:(id)entry;
 @end
 
+@interface MLVideo : NSObject
+- (id)streamingData;
+@end
+
 @interface __NSURLSessionLocal : NSURLSession
 @end
 
 #pragma mark - Shared decision helper
 
-/// The single decision both layers use. Anything not recognisable as a video is
-/// left untouched, so headers, chips and shelf titles keep working.
+/// The single decision every surface uses. Anything that names neither a video
+/// nor a channel is left untouched, so chips, headers and shelf titles keep
+/// working; everything else has to be allowed by the whitelist.
+///
+/// This deliberately covers more than one video per element. A shelf such as
+/// "explore other channels" or "from related searches" is a single element
+/// carrying several items, and it is hidden when *none* of the channels in it is
+/// subscribed. When one of them is, the shelf stays and its items — which are
+/// elements in their own right — are judged individually.
 static BOOL LFShouldHideFeedItem(NSDictionary *info) {
     if (!LFFilteringActive())
         return NO;
-    if ([[info objectForKey:LFInfoVideoIds] count] == 0)
+    if (!LFInfoCarriesContent(info))
         return NO;
     return LFShouldHideInfo(info);
 }
@@ -75,13 +86,7 @@ static BOOL LFShouldHideFeedItem(NSDictionary *info) {
     if (!LFFilteringActive())
         return data;
 
-    // Only a single-video lockup is blanked wholesale; a shelf carries several
-    // videos and its items are separate elements that get filtered on their own.
-    NSDictionary *info = LFInfoForRenderer(self, data);
-    if (!LFInfoIsSingleVideoLockup(info))
-        return data;
-
-    return LFShouldHideFeedItem(info) ? [NSData data] : data;
+    return LFShouldHideFeedItem(LFInfoForRenderer(self, data)) ? [NSData data] : data;
 }
 
 %end
@@ -211,6 +216,33 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
 %end
 
 %end // LFShortsFiltering
+
+#pragma mark - Playback
+
+%group LFPlaybackBlocking
+
+// Hiding a video everywhere it is listed is not the same as making it
+// unreachable: a link, a notification, or a surface the filter has not learned
+// yet can still land on the watch page. `MLVideo` is where the player asks for
+// something to play and is also where the owning channel is stated, so a video
+// from outside the whitelist is simply given no streams — the same outcome the
+// app already handles for a video it cannot play.
+%hook MLVideo
+
+- (id)streamingData {
+    if (!LFFilteringActive())
+        return %orig;
+
+    NSString *channelId = LFSafeValueForKey(LFSafeValueForKey(self, @"videoDetails"), @"channelId");
+    if ([channelId isKindOfClass:[NSString class]] && channelId.length > 0 && !LFIsAllowedChannel(channelId))
+        return nil;
+
+    return %orig;
+}
+
+%end
+
+%end // LFPlaybackBlocking
 
 #pragma mark - Subscribe / account controls in the view hierarchy
 
@@ -384,6 +416,7 @@ static void LFInspectMutableRequest(NSMutableURLRequest *request, NSString *fiel
     %init(LFElementFiltering);
     %init(LFCellFiltering);
     %init(LFShortsFiltering);
+    %init(LFPlaybackBlocking);
     %init(LFControlHiding);
     %init(LFNetworking);
 

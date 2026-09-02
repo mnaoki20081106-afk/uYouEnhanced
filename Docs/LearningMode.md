@@ -103,8 +103,12 @@ Without that, one early scan would hide a subscribed video permanently.
 Every one of them ends up in `LFShouldHideInfo()`, so there is exactly one place
 where "allowed" is defined.
 
-Non-video cells (chips, headers, shelf titles, comments, the Subscriptions tab's
-own chrome) are never filtered: an item without a video id is skipped outright.
+Cells that name neither a video nor a trustworthy channel id — chips, headers,
+shelf titles, comments, the Subscriptions tab's own chrome — are never filtered.
+
+The signed-in account's own channel counts as allowed even when the account does
+not subscribe to itself; it is learned from `X-Goog-PageId` (§7), and without it
+the "You" tab would hide the user from themselves.
 
 ## 5. Where the whitelist comes from
 
@@ -234,6 +238,9 @@ With channels **A** and **B** subscribed and **C** not:
 | Search results (search itself still works) | shown | shown | hidden |
 | Shorts feed and Shorts shelves | shown | shown | hidden |
 | Related / up-next | shown | shown | hidden |
+| "Explore other channels" / "from related searches" shelves | shown | shown | the shelf is hidden when nothing in it is subscribed |
+| Channel cards | shown | shown | hidden |
+| Opening a C video by link | — | — | does not play |
 
 Also verify:
 

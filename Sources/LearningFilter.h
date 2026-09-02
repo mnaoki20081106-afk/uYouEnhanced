@@ -63,6 +63,11 @@ static NSString *const kLFBoundAccount = @"learningModeBoundAccount";
 
 /// Single entry point used by every surface (spec §8).
 LF_EXTERN BOOL LFIsSubscribedToChannel(NSString *_Nullable channelId);
+/// The signed-in account's own channel, learned from `X-Goog-PageId`. It counts
+/// as allowed even when the account does not subscribe to itself, so the "You"
+/// tab does not hide the user from themselves.
+LF_EXTERN BOOL LFIsOwnChannel(NSString *_Nullable channelId);
+LF_EXTERN void LFSetOwnChannel(NSString *_Nullable channelId);
 LF_EXTERN BOOL LFIsAllowedChannel(NSString *_Nullable channelId);
 
 /// YES when the master switch is on *and* a whitelist is available.
@@ -92,7 +97,8 @@ LF_EXTERN BOOL LFDataLooksLikeSubscribeControl(NSData *_Nullable data);
 static NSString *const LFInfoVideoIds = @"videoIds";     // NSSet<NSString *>
 static NSString *const LFInfoChannelIds = @"channelIds"; // NSSet<NSString *>
 static NSString *const LFInfoChannelName = @"channelName";
-static NSString *const LFInfoIsShort = @"isShort";   // NSNumber<BOOL>
+static NSString *const LFInfoIsShort = @"isShort";                     // NSNumber<BOOL>
+static NSString *const LFInfoHasStrongChannelId = @"hasStrongChannel"; // NSNumber<BOOL>
 
 /// Scans a serialised element payload for `UC…` channel ids and `videoId`s.
 LF_EXTERN NSDictionary *_Nullable LFInfoFromData(NSData *_Nullable data);
@@ -109,9 +115,10 @@ LF_EXTERN NSDictionary *_Nullable LFInfoFromElementRenderer(id _Nullable rendere
 /// Cached lookup for an `ASDisplayNode` backing a feed cell.
 LF_EXTERN NSDictionary *_Nullable LFInfoFromNode(id _Nullable node);
 
-/// YES when the payload describes exactly one video (a lockup), as opposed to a
-/// shelf/section that carries many. Only single lockups are hidden wholesale.
-LF_EXTERN BOOL LFInfoIsSingleVideoLockup(NSDictionary *_Nullable info);
+/// YES when the payload describes something the whitelist has an opinion about:
+/// a video, or a channel named by a trustworthy id. Chips, headers and other
+/// chrome carry neither and are never touched.
+LF_EXTERN BOOL LFInfoCarriesContent(NSDictionary *_Nullable info);
 
 #pragma mark - Subscription sync
 
