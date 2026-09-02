@@ -13,6 +13,15 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// The .xm files are compiled as Objective-C++ while LearningFilterCore.m is
+// Objective-C, so every free function below has to be declared with C linkage —
+// otherwise the C++ side looks for a mangled symbol the C side never defines.
+#ifdef __cplusplus
+#define LF_EXTERN extern "C"
+#else
+#define LF_EXTERN extern
+#endif
+
 #pragma mark - Defaults keys
 
 // Master switch. When off the tweak is completely inert.
@@ -62,11 +71,11 @@ static NSString *const kLFBoundAccount = @"learningModeBoundAccount";
 #pragma mark - Common filter layer
 
 /// Single entry point used by every surface (spec §8).
-BOOL LFIsSubscribedToChannel(NSString *_Nullable channelId);
-BOOL LFIsAllowedChannel(NSString *_Nullable channelId);
+LF_EXTERN BOOL LFIsSubscribedToChannel(NSString *_Nullable channelId);
+LF_EXTERN BOOL LFIsAllowedChannel(NSString *_Nullable channelId);
 
 /// YES when the master switch is on *and* a whitelist is available.
-BOOL LFFilteringActive(void);
+LF_EXTERN BOOL LFFilteringActive(void);
 
 typedef NS_ENUM(NSInteger, LFDecision) {
     LFDecisionAllow,   // resolved to a subscribed channel
@@ -75,18 +84,18 @@ typedef NS_ENUM(NSInteger, LFDecision) {
 };
 
 /// Applies the whitelist to an already extracted metadata dictionary.
-LFDecision LFDecisionForInfo(NSDictionary *_Nullable info);
+LF_EXTERN LFDecision LFDecisionForInfo(NSDictionary *_Nullable info);
 /// Convenience: resolves `LFDecisionUnknown` using kLFStrictUnknown.
-BOOL LFShouldHideInfo(NSDictionary *_Nullable info);
+LF_EXTERN BOOL LFShouldHideInfo(NSDictionary *_Nullable info);
 
 #pragma mark - Metadata extraction
 
 /// Exception-free, zero-argument, object-returning accessor. Used instead of
 /// `-valueForKey:` so a missing selector never throws inside a hook.
-id _Nullable LFSafeValueForKey(id _Nullable object, NSString *key);
+LF_EXTERN id _Nullable LFSafeValueForKey(id _Nullable object, NSString *key);
 
 /// YES when the payload contains one of the subscribe-button element ids.
-BOOL LFDataLooksLikeSubscribeControl(NSData *_Nullable data);
+LF_EXTERN BOOL LFDataLooksLikeSubscribeControl(NSData *_Nullable data);
 
 // Keys produced by the extractors below.
 static NSString *const LFInfoVideoIds = @"videoIds";     // NSSet<NSString *>
@@ -95,23 +104,23 @@ static NSString *const LFInfoChannelName = @"channelName";
 static NSString *const LFInfoIsShort = @"isShort";   // NSNumber<BOOL>
 
 /// Scans a serialised element payload for `UC…` channel ids and `videoId`s.
-NSDictionary *_Nullable LFInfoFromData(NSData *_Nullable data);
+LF_EXTERN NSDictionary *_Nullable LFInfoFromData(NSData *_Nullable data);
 /// Scans an arbitrary string (a protobuf text dump, a URL, …).
-NSDictionary *_Nullable LFInfoFromString(NSString *_Nullable text);
+LF_EXTERN NSDictionary *_Nullable LFInfoFromString(NSString *_Nullable text);
 /// Raw `UC…` channel ids found in a payload, used as a last-resort parser for
 /// server-driven InnerTube responses.
-NSSet<NSString *> *LFChannelIdsInData(NSData *_Nullable data);
+LF_EXTERN NSSet<NSString *> *LFChannelIdsInData(NSData *_Nullable data);
 /// Cached lookup for a `YTIElementRenderer`. Pass the already-materialised
 /// payload when calling from inside a `-elementData` hook so the extraction
 /// never re-enters that hook.
-NSDictionary *_Nullable LFInfoForRenderer(id _Nullable renderer, NSData *_Nullable data);
-NSDictionary *_Nullable LFInfoFromElementRenderer(id _Nullable renderer);
+LF_EXTERN NSDictionary *_Nullable LFInfoForRenderer(id _Nullable renderer, NSData *_Nullable data);
+LF_EXTERN NSDictionary *_Nullable LFInfoFromElementRenderer(id _Nullable renderer);
 /// Cached lookup for an `ASDisplayNode` backing a feed cell.
-NSDictionary *_Nullable LFInfoFromNode(id _Nullable node);
+LF_EXTERN NSDictionary *_Nullable LFInfoFromNode(id _Nullable node);
 
 /// YES when the payload describes exactly one video (a lockup), as opposed to a
 /// shelf/section that carries many. Only single lockups are hidden wholesale.
-BOOL LFInfoIsSingleVideoLockup(NSDictionary *_Nullable info);
+LF_EXTERN BOOL LFInfoIsSingleVideoLockup(NSDictionary *_Nullable info);
 
 #pragma mark - Subscription sync
 
@@ -158,15 +167,15 @@ static NSString *const kLFOwnRequestHeader = @"X-uYE-LearningFilter";
 #pragma mark - Subscribe/unsubscribe blocking
 
 /// YES when the URL performs a subscription mutation that must be refused.
-BOOL LFIsSubscriptionMutationURL(NSURL *_Nullable url);
+LF_EXTERN BOOL LFIsSubscriptionMutationURL(NSURL *_Nullable url);
 /// YES when the string identifies a subscribe button element/view.
-BOOL LFIdentifierIsSubscribeControl(NSString *_Nullable identifier);
+LF_EXTERN BOOL LFIdentifierIsSubscribeControl(NSString *_Nullable identifier);
 /// YES when the string identifies an "add account" / account switcher control.
-BOOL LFIdentifierIsAccountSwitchControl(NSString *_Nullable identifier);
+LF_EXTERN BOOL LFIdentifierIsAccountSwitchControl(NSString *_Nullable identifier);
 
 #pragma mark - Settings
 
 /// Appends the Learning Mode rows to the uYouEnhanced settings section.
-void LFAppendSettingsItems(NSMutableArray *sectionItems, id settingsViewController);
+LF_EXTERN void LFAppendSettingsItems(NSMutableArray *sectionItems, id settingsViewController);
 
 NS_ASSUME_NONNULL_END

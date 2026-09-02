@@ -203,12 +203,20 @@ Both suites were mutation-checked: deliberately breaking the boundary checks,
 the strong-prefix rule, the allow/deny direction, the signed-out gate, strict
 mode or the retry cache makes them fail.
 
-The whole tree is also compile-checked against the real iOS SDK and the real
-`Tweaks/YouTubeHeader`, after running each `.xm` through `logos.pl` — the same
-front end theos uses. **Use `-Werror -Wvla -Wgnu-folding-constant`**: theos
-builds with `-Werror`, and a `static const size_t` used as an array bound is a
-warning on Apple clang (`-Wgnu-folding-constant`) but only surfaces as `-Wvla`
-elsewhere — that exact difference let a CI-breaking VLA through once.
+`Tests/compile-check.sh` goes further, against the real iOS SDK and the real
+`Tweaks/YouTubeHeader`, with each `.xm` run through `logos.pl` — the same front
+end theos uses. It builds actual object files rather than syntax-checking, which
+matters for two reasons that each broke CI once:
+
+* **theos builds with `-Werror`**, so the check does too, plus `-Wvla` *and*
+  `-Wgnu-folding-constant`: a `static const size_t` used as an array bound is
+  reported under the first by some clangs and the second by Apple's, and that
+  difference is what hid a variable-length array.
+* **`.xm` is Objective-C++ and `.m` is Objective-C.** A free function declared
+  without C linkage resolves to a mangled name on one side and an unmangled one
+  on the other, and nothing but a symbol check across the built objects sees it.
+  That is why every free function in `LearningFilter.h` carries `LF_EXTERN`, and
+  why the script ends by diffing defined against undefined symbols.
 
 ## 10. On-device test plan
 
