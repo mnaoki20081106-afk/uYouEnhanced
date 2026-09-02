@@ -40,8 +40,7 @@ static NSData *LockupPayload(NSString *channelId, NSString *videoId) {
 
 static void resetDefaults(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    for (NSString *key in @[kLFEnabled, kLFStrictUnknown, kLFFilterFeeds, kLFFilterShorts, kLFLockSubscriptions,
-                            kLFSingleAccount, kLFStoredChannels, kLFLastSyncDate, kLFBoundAccount])
+    for (NSString *key in @[kLFStoredChannels, kLFLastSyncDate, kLFBoundAccount])
         [defaults removeObjectForKey:key];
     [[LFSubscriptionStore sharedStore] reset];
 }
@@ -156,26 +155,22 @@ static void testStore(void) {
     check(!store.ready, @"reset store is not ready");
 }
 
+// Learning Mode cannot be switched off; the only thing that holds the filter
+// back is having no whitelist to apply.
 static void testFilteringGate(void) {
     resetDefaults();
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
-    check(!LFFilteringActive(), @"filter inert while disabled");
-
-    [defaults setBool:YES forKey:kLFEnabled];
     check(!LFFilteringActive(), @"filter inert while the whitelist is empty (signed out)");
 
     [[LFSubscriptionStore sharedStore] replaceWithChannels:@[@{@"id": REAL_ID, @"name": @"Math Channel A"}]];
-    check(LFFilteringActive(), @"filter active once enabled and synced");
+    check(LFFilteringActive(), @"filter active once a whitelist exists");
 
-    [defaults setBool:NO forKey:kLFEnabled];
-    check(!LFFilteringActive(), @"master switch wins over a populated whitelist");
+    [[LFSubscriptionStore sharedStore] reset];
+    check(!LFFilteringActive(), @"filter goes inert again when the whitelist is cleared");
 }
 
 static void testDecisions(void) {
     resetDefaults();
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setBool:YES forKey:kLFEnabled];
     [[LFSubscriptionStore sharedStore] replaceWithChannels:@[@{@"id": REAL_ID, @"name": @"Math Channel A"}]];
 
     check(LFIsSubscribedToChannel(REAL_ID), @"isSubscribedToChannel true for a subscribed id");
@@ -211,10 +206,7 @@ static void testDecisions(void) {
     check(LFDecisionForInfo(unknown) == LFDecisionUnknown, @"unresolvable item reports unknown");
     check(LFDecisionForInfo(nil) == LFDecisionUnknown, @"nil info reports unknown");
 
-    [defaults setBool:YES forKey:kLFStrictUnknown];
-    check(LFShouldHideInfo(unknown), @"strict mode hides an unresolvable item");
-    [defaults setBool:NO forKey:kLFStrictUnknown];
-    check(!LFShouldHideInfo(unknown), @"lenient mode shows an unresolvable item");
+    check(LFShouldHideInfo(unknown), @"an unresolvable item is always hidden, never shown on a guess");
 }
 
 // A payload that is still being populated must not be cached as "no channel":

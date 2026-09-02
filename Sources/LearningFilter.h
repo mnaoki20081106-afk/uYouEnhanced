@@ -24,19 +24,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Defaults keys
 
-// Master switch. When off the tweak is completely inert.
-static NSString *const kLFEnabled = @"learningMode_enabled";
-// Hide items whose channel cannot be resolved (spec: never allow on a guess).
-static NSString *const kLFStrictUnknown = @"learningModeStrictUnknown_enabled";
-// Individual surfaces.
-static NSString *const kLFFilterFeeds = @"learningModeFilterFeeds_enabled";
-static NSString *const kLFFilterShorts = @"learningModeFilterShorts_enabled";
-// Forbid subscribing / unsubscribing.
-static NSString *const kLFLockSubscriptions = @"learningModeLockSubscriptions_enabled";
-// Allow at most one signed-in account.
-static NSString *const kLFSingleAccount = @"learningModeSingleAccount_enabled";
-
-// Persisted state (not user facing).
+// Learning Mode has no switches: filtering, the strict "never allow on a guess"
+// rule, the subscription lock and the one-account limit are always on. A device
+// restricted to learning is not one where the restriction can be toggled off.
+// The only stored state is therefore the whitelist itself.
 static NSString *const kLFStoredChannels = @"learningModeSubscribedChannels";
 static NSString *const kLFLastSyncDate = @"learningModeLastSyncDate";
 static NSString *const kLFBoundAccount = @"learningModeBoundAccount";

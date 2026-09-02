@@ -210,11 +210,9 @@ BOOL LFIsAllowedChannel(NSString *channelId) {
 }
 
 BOOL LFFilteringActive(void) {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    if (![defaults boolForKey:kLFEnabled])
-        return NO;
-    // Signed out / never synced: no whitelist exists, so Whitelist Mode cannot
-    // be applied at all (spec §9). Staying inert beats blanking the whole app.
+    // The only thing that can hold the filter back: signed out or never synced,
+    // where no whitelist exists so Whitelist Mode cannot be applied at all
+    // (spec §9). Staying inert beats blanking the whole app.
     return [[LFSubscriptionStore sharedStore] ready];
 }
 
@@ -244,12 +242,11 @@ BOOL LFShouldHideInfo(NSDictionary *info) {
         case LFDecisionAllow:
             return NO;
         case LFDecisionHide:
-            return YES;
         case LFDecisionUnknown:
-            break;
+            // Spec §14: never allow something through on a guess.
+            return YES;
     }
-    // Spec §14: never allow something through on a guess.
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kLFStrictUnknown];
+    return YES;
 }
 
 #pragma mark - Payload scanning
@@ -481,8 +478,9 @@ static NSString *LFChannelNameFromObject(id object) {
 }
 
 /// Guards `-description` re-entrancy: the protobuf dump is only taken when the
-/// cheap binary scan came up short.
-static BOOL LFDescribing = NO;
+/// cheap binary scan came up short. Re-entrancy is per-thread, and layout runs
+/// on several, so this has to be thread-local rather than one shared flag.
+static __thread BOOL LFDescribing = NO;
 
 static NSDictionary *LFInfoFromRendererUncached(id renderer, NSData *payload) {
     NSDictionary *info = nil;

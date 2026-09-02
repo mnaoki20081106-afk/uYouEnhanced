@@ -43,34 +43,14 @@
 
 #pragma mark - Shared decision helper
 
-static BOOL LFFeedFilteringEnabled(void) {
-    return LFFilteringActive() && [[NSUserDefaults standardUserDefaults] boolForKey:kLFFilterFeeds];
-}
-
-static BOOL LFShortsFilteringEnabled(void) {
-    return LFFilteringActive() && [[NSUserDefaults standardUserDefaults] boolForKey:kLFFilterShorts];
-}
-
-static BOOL LFAnyFeedFilteringEnabled(void) {
-    return LFFeedFilteringEnabled() || LFShortsFilteringEnabled();
-}
-
 /// The single decision both layers use. Anything not recognisable as a video is
-/// left untouched, so headers, chips and shelf titles keep working; a Shorts
-/// lockup follows the Shorts switch and everything else the feed switch.
+/// left untouched, so headers, chips and shelf titles keep working.
 static BOOL LFShouldHideFeedItem(NSDictionary *info) {
     if (!LFFilteringActive())
         return NO;
     if ([[info objectForKey:LFInfoVideoIds] count] == 0)
         return NO;
-
-    BOOL enabled = [[info objectForKey:LFInfoIsShort] boolValue] ? LFShortsFilteringEnabled()
-                                                                 : LFFeedFilteringEnabled();
-    return enabled && LFShouldHideInfo(info);
-}
-
-static BOOL LFSubscriptionsLocked(void) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kLFLockSubscriptions];
+    return LFShouldHideInfo(info);
 }
 
 #pragma mark - Layer A: element level
@@ -84,7 +64,7 @@ static BOOL LFSubscriptionsLocked(void) {
     if (![data isKindOfClass:[NSData class]] || data.length == 0)
         return data;
 
-    if (LFSubscriptionsLocked() && LFDataLooksLikeSubscribeControl(data)) {
+    if (LFDataLooksLikeSubscribeControl(data)) {
         NSDictionary *info = LFInfoForRenderer(self, data);
         // A subscribe control is its own element; a video lockup that merely
         // mentions one must not be blanked.
@@ -92,7 +72,7 @@ static BOOL LFSubscriptionsLocked(void) {
             return [NSData data];
     }
 
-    if (!LFAnyFeedFilteringEnabled())
+    if (!LFFilteringActive())
         return data;
 
     // Only a single-video lockup is blanked wholesale; a shelf carries several
@@ -162,7 +142,7 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
 
 %new
 - (void)lfScheduleFiltering {
-    if (!LFAnyFeedFilteringEnabled())
+    if (!LFFilteringActive())
         return;
     if (self.lfFilterScheduled || LFCollectionViewIsScrolling(self))
         return;
@@ -176,7 +156,7 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
         if (!strongSelf)
             return;
         strongSelf.lfFilterScheduled = NO;
-        if (!LFAnyFeedFilteringEnabled())
+        if (!LFFilteringActive())
             return;
         LFFilterVisibleCells(strongSelf);
     });
@@ -210,7 +190,7 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
 
 - (id)makeContentModelForEntry:(id)entry {
     id model = %orig;
-    if (!model || !LFShortsFilteringEnabled())
+    if (!model || !LFFilteringActive())
         return model;
 
     // The reel's own player response carries the authoritative channel id.
@@ -224,8 +204,8 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
     if ([[info objectForKey:LFInfoChannelIds] count] > 0 || [[info objectForKey:LFInfoChannelName] length] > 0)
         return LFShouldHideInfo(info) ? nil : model;
 
-    // Nothing identifiable: fall back to the strict-mode preference (spec §14).
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kLFStrictUnknown] ? nil : model;
+    // Nothing identifiable: never let it through on a guess (spec §14).
+    return nil;
 }
 
 %end
@@ -241,13 +221,12 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
 - (void)didMoveToWindow {
     %orig;
     NSString *identifier = self.accessibilityIdentifier;
-    if (LFSubscriptionsLocked() && LFIdentifierIsSubscribeControl(identifier)) {
+    if (LFIdentifierIsSubscribeControl(identifier)) {
         self.hidden = YES;
         self.userInteractionEnabled = NO;
         return;
     }
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:kLFSingleAccount] &&
-        [[LFAccountGuard sharedGuard] accountSlotTaken] && LFIdentifierIsAccountSwitchControl(identifier)) {
+    if ([[LFAccountGuard sharedGuard] accountSlotTaken] && LFIdentifierIsAccountSwitchControl(identifier)) {
         self.hidden = YES;
         self.userInteractionEnabled = NO;
     }
@@ -282,7 +261,7 @@ static void LFHandleOutgoingRequest(NSURLRequest *request) {
 static BOOL LFRequestMustBeBlocked(NSURLRequest *request) {
     if (![request isKindOfClass:[NSURLRequest class]])
         return NO;
-    if (LFSubscriptionsLocked() && LFIsSubscriptionMutationURL(request.URL))
+    if (LFIsSubscriptionMutationURL(request.URL))
         return YES;
     return [[LFAccountGuard sharedGuard] shouldBlockRequest:request];
 }
@@ -400,26 +379,8 @@ static void LFInspectMutableRequest(NSMutableURLRequest *request, NSString *fiel
 #pragma mark - Startup
 
 %ctor {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-
-    // First launch: pick the defaults the spec asks for. Feed/Shorts filtering
-    // and the strict unknown-channel rule are on, but the master switch stays
-    // off so an existing install is never changed behind the user's back.
-    if (![defaults objectForKey:kLFStrictUnknown])
-        [defaults setBool:YES forKey:kLFStrictUnknown];
-    if (![defaults objectForKey:kLFFilterFeeds])
-        [defaults setBool:YES forKey:kLFFilterFeeds];
-    if (![defaults objectForKey:kLFFilterShorts])
-        [defaults setBool:YES forKey:kLFFilterShorts];
-    if (![defaults objectForKey:kLFLockSubscriptions])
-        [defaults setBool:YES forKey:kLFLockSubscriptions];
-    if (![defaults objectForKey:kLFSingleAccount])
-        [defaults setBool:YES forKey:kLFSingleAccount];
-
-    BOOL enabled = [defaults boolForKey:kLFEnabled];
-    if (!enabled)
-        return;
-
+    // Learning Mode is not optional, so the hooks always go in. Whether they do
+    // anything is decided by LFFilteringActive(), which needs a whitelist.
     %init(LFElementFiltering);
     %init(LFCellFiltering);
     %init(LFShortsFiltering);

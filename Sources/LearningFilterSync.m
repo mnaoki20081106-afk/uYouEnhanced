@@ -286,7 +286,12 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
 }
 
 - (NSDictionary *)contextForClient:(NSString *)clientName {
-    NSString *version = self.clientVersion.length > 0 ? self.clientVersion : @"21.14.4";
+    NSString *version = nil;
+    @synchronized(self) {
+        version = self.clientVersion;
+    }
+    if (version.length == 0)
+        version = @"21.14.4";
     if ([clientName isEqualToString:@"WEB"])
         version = @"2.20240726.00.00";
     return @{
@@ -354,10 +359,12 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
 
     NSMutableDictionary<NSString *, NSString *> *collected = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *subscribedIds = [NSMutableSet set];
+    NSMutableSet<NSString *> *rawIds = [NSMutableSet set];
     [self browseSubscriptionsWithClients:@[@"IOS", @"WEB"]
                                clientIdx:0
                                collected:collected
                            subscribedIds:subscribedIds
+                                  rawIds:rawIds
                                   finish:finish];
 }
 
@@ -366,9 +373,10 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
                              clientIdx:(NSUInteger)clientIdx
                              collected:(NSMutableDictionary<NSString *, NSString *> *)collected
                          subscribedIds:(NSMutableSet<NSString *> *)subscribedIds
+                                rawIds:(NSMutableSet<NSString *> *)rawIds
                                 finish:(void (^)(BOOL, NSUInteger, NSString *))finish {
     if (clientIdx >= clients.count) {
-        [self commitCollected:collected subscribedIds:subscribedIds finish:finish];
+        [self commitCollected:collected subscribedIds:subscribedIds rawIds:rawIds finish:finish];
         return;
     }
 
@@ -377,16 +385,18 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
                       body:@{@"browseId": @"FEchannels"}
                  collected:collected
              subscribedIds:subscribedIds
+                    rawIds:rawIds
              continuations:0
                 completion:^{
                     if (collected.count > 0) {
-                        [self commitCollected:collected subscribedIds:subscribedIds finish:finish];
+                        [self commitCollected:collected subscribedIds:subscribedIds rawIds:rawIds finish:finish];
                         return;
                     }
                     [self browseSubscriptionsWithClients:clients
                                                clientIdx:clientIdx + 1
                                                collected:collected
                                            subscribedIds:subscribedIds
+                                                  rawIds:rawIds
                                                   finish:finish];
                 }];
 }
@@ -395,6 +405,7 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
                     body:(NSDictionary *)body
                collected:(NSMutableDictionary<NSString *, NSString *> *)collected
            subscribedIds:(NSMutableSet<NSString *> *)subscribedIds
+                  rawIds:(NSMutableSet<NSString *> *)rawIds
            continuations:(NSUInteger)continuationCount
               completion:(void (^)(void))completion {
     [self performBrowseWithClient:client
@@ -402,12 +413,11 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
                        completion:^(id json, NSData *raw, NSError *error) {
                            if (error || !json) {
                                // Server-driven responses are not always JSON we
-                               // can decode; fall back to a raw id scan.
-                               NSSet<NSString *> *ids = LFChannelIdsInData(raw);
-                               for (NSString *channelId in ids) {
-                                   if (!collected[channelId])
-                                       collected[channelId] = @"";
-                               }
+                               // can decode. Park a raw id scan as a last resort
+                               // — it cannot tell a subscription from a
+                               // recommendation, so the next client gets its
+                               // turn before this is ever used.
+                               [rawIds unionSet:LFChannelIdsInData(raw)];
                                completion();
                                return;
                            }
@@ -420,6 +430,7 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
                                                  body:@{@"continuation": tokens.firstObject}
                                             collected:collected
                                         subscribedIds:subscribedIds
+                                               rawIds:rawIds
                                         continuations:continuationCount + 1
                                            completion:completion];
                                return;
@@ -430,11 +441,15 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
 
 - (void)commitCollected:(NSMutableDictionary<NSString *, NSString *> *)collected
           subscribedIds:(NSMutableSet<NSString *> *)subscribedIds
+                 rawIds:(NSMutableSet<NSString *> *)rawIds
                  finish:(void (^)(BOOL, NSUInteger, NSString *))finish {
-    // Prefer the entries the response explicitly marks as subscribed; that keeps
-    // "channels you might like" shelves out of the whitelist. Only when the
-    // response carries no such marker do we fall back to every channel it named.
-    NSArray<NSString *> *identifiers = subscribedIds.count > 0 ? subscribedIds.allObjects : collected.allKeys;
+    // Most to least trustworthy: entries the response explicitly marks as
+    // subscribed (which keeps "channels you might like" shelves out), then every
+    // channel a decodable response named, then a raw byte scan of a response
+    // nothing could parse.
+    NSArray<NSString *> *identifiers = subscribedIds.count > 0 ? subscribedIds.allObjects
+                                     : collected.count > 0     ? collected.allKeys
+                                                               : rawIds.allObjects;
 
     // The signed-in user's own channel shows up in some responses; keeping it is
     // harmless (their own uploads stay visible) so no filtering is applied here.
@@ -560,8 +575,6 @@ static NSString *const kLFBoundAuthUserKey = @"authUser";
 }
 
 - (BOOL)shouldBlockRequest:(NSURLRequest *)request {
-    if (![[NSUserDefaults standardUserDefaults] boolForKey:kLFSingleAccount])
-        return NO;
     if (![request isKindOfClass:[NSURLRequest class]] || LFIsOwnRequest(request) || !LFIsInnerTubeRequest(request))
         return NO;
     if (!LFRequestIsAuthenticated(request))

@@ -31,9 +31,14 @@ static NSString *LFStatusDescription(void) {
         when = [formatter stringFromDate:lastSync];
     }
 
-    if (store.count == 0)
+    if (store.count == 0) {
+        // The last failure reason is the useful half of this row when nothing
+        // has synced yet, so show it rather than a generic line.
+        NSString *reason = [LFSubscriptionSync sharedSync].statusDescription;
         return [NSString stringWithFormat:@"No whitelist yet (last sync: %@). Filtering stays off until the "
-                                          @"subscription list has been read. Tap to sync now.", when];
+                                          @"subscription list has been read. Tap to sync now.\n%@",
+                                          when, reason.length > 0 ? reason : @""];
+    }
 
     return [NSString stringWithFormat:@"%lu subscribed channels · last sync: %@ · tap to sync now",
                                       (unsigned long)store.count, when];
@@ -79,18 +84,6 @@ static void LFPresentWhitelist(id settingsViewController) {
     [(UIViewController *)settingsViewController presentViewController:viewController animated:YES completion:nil];
 }
 
-static YTSettingsSectionItem *LFSwitchItem(NSString *title, NSString *description, NSString *key) {
-    return [%c(YTSettingsSectionItem) switchItemWithTitle:title
-                                        titleDescription:description
-                                 accessibilityIdentifier:nil
-                                                switchOn:[[NSUserDefaults standardUserDefaults] boolForKey:key]
-                                             switchBlock:^BOOL(YTSettingsCell *cell, BOOL enabled) {
-                                                 [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:key];
-                                                 return YES;
-                                             }
-                                           settingItemId:0];
-}
-
 void LFAppendSettingsItems(NSMutableArray *sectionItems, id settingsViewController) {
     [sectionItems addObject:[%c(YTSettingsSectionItem)
                                 itemWithTitle:@"\t"
@@ -99,19 +92,16 @@ void LFAppendSettingsItems(NSMutableArray *sectionItems, id settingsViewControll
                               detailTextBlock:nil
                                   selectBlock:^BOOL(YTSettingsCell *cell, NSUInteger index) { return NO; }]];
 
+    // Learning Mode has no switches by design, so this row only explains it.
     [sectionItems addObject:[%c(YTSettingsSectionItem)
-                                switchItemWithTitle:@"Enable Learning Mode"
-                                   titleDescription:@"Only videos from channels this account is already subscribed "
-                                                    @"to are shown in Home, Search, Shorts and related videos. "
-                                                    @"Restart YouTube after changing this."
-                            accessibilityIdentifier:nil
-                                           switchOn:[[NSUserDefaults standardUserDefaults] boolForKey:kLFEnabled]
-                                        switchBlock:^BOOL(YTSettingsCell *cell, BOOL enabled) {
-                                            [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kLFEnabled];
-                                            LFShowToast(@"Restart YouTube to apply Learning Mode");
-                                            return YES;
-                                        }
-                                      settingItemId:0]];
+                                itemWithTitle:@"Always on"
+                             titleDescription:@"Home, Search, Shorts and related videos show only channels this "
+                                              @"account is already subscribed to. Subscribing and unsubscribing are "
+                                              @"refused, and only one account may sign in. None of this can be "
+                                              @"turned off."
+                      accessibilityIdentifier:nil
+                              detailTextBlock:nil
+                                  selectBlock:^BOOL(YTSettingsCell *cell, NSUInteger index) { return NO; }]];
 
     [sectionItems addObject:[%c(YTSettingsSectionItem)
                                 itemWithTitle:@"Sync subscriptions now"
@@ -139,32 +129,6 @@ void LFAppendSettingsItems(NSMutableArray *sectionItems, id settingsViewControll
                                       LFPresentWhitelist(settingsViewController);
                                       return YES;
                                   }]];
-
-    [sectionItems addObject:LFSwitchItem(@"Filter Home, Search and Related",
-                                         @"Hides every video in the recommendation, search and related feeds that "
-                                         @"does not come from a subscribed channel.",
-                                         kLFFilterFeeds)];
-
-    [sectionItems addObject:LFSwitchItem(@"Filter Shorts",
-                                         @"Applies the same whitelist to the Shorts feed, Shorts shelves and Shorts "
-                                         @"in search results.",
-                                         kLFFilterShorts)];
-
-    [sectionItems addObject:LFSwitchItem(@"Hide unidentifiable videos",
-                                         @"When a video's channel cannot be determined, hide it instead of showing "
-                                         @"it. Turn this off only for troubleshooting — it weakens the filter.",
-                                         kLFStrictUnknown)];
-
-    [sectionItems addObject:LFSwitchItem(@"Lock subscriptions",
-                                         @"Hides subscribe buttons and refuses subscribe/unsubscribe requests, so "
-                                         @"the whitelist cannot be extended from inside the app. Existing "
-                                         @"subscriptions are left untouched.",
-                                         kLFLockSubscriptions)];
-
-    [sectionItems addObject:LFSwitchItem(@"One account only",
-                                         @"After the first account signs in, additional accounts and account "
-                                         @"switching are refused. Signing out stays possible.",
-                                         kLFSingleAccount)];
 
     [sectionItems addObject:[%c(YTSettingsSectionItem)
                                 itemWithTitle:@"Release the bound account"

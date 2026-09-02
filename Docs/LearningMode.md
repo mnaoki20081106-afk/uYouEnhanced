@@ -2,8 +2,13 @@
 
 Learning Mode restricts YouTube to the channels the signed-in account is
 *already* subscribed to. It is an additive feature: nothing in uYouEnhanced was
-removed or rewritten, and with the master switch off the tweak is completely
-inert (its `%ctor` returns before installing a single hook).
+removed or rewritten.
+
+**There is no way to turn it off.** A device restricted to learning is not one
+where the restriction can be toggled, so the mode has no switches: the filter,
+the strict "never allow on a guess" rule, the subscription lock and the
+one-account limit are all constants. The only thing that holds the filter back
+is having no whitelist to apply (see §5).
 
 ```
 Whitelist == the account's current subscription list
@@ -133,15 +138,16 @@ Requests the tweak issues itself carry `X-uYE-LearningFilter: 1` so the hooks
 ignore them.
 
 **Signed out / never synced (spec §9):** with an empty store `LFFilteringActive()`
-returns `NO` and nothing is filtered. A signed-out app is a normal app rather
-than an empty one, and the filter switches itself on as soon as a whitelist
-exists.
+returns `NO` and nothing is filtered — this is the one and only condition under
+which the mode is inert. A signed-out app is a normal app rather than an empty
+one, and the filter engages again as soon as a whitelist exists.
 
 ## 6. Locking subscriptions
 
 * `-[YTIElementRenderer elementData]` returns empty data for elements whose
   payload contains `subscribe_button` / `compact_subscribe` / `subscription_button`
   **and** no video id, so a video cell that merely mentions the word survives.
+  This runs unconditionally — there is no lock to disable.
 * `_ASDisplayView.didMoveToWindow` hides views whose accessibility identifier
   names a subscribe control.
 * The definitive stop: requests to `/youtubei/v1/subscription/subscribe` and
@@ -172,18 +178,18 @@ perfectly legitimate single account out of its own app. Afterwards:
 
 ## 8. Settings
 
-uYouEnhanced ▸ **🎓 Learning Mode (subscriptions only)**
+uYouEnhanced ▸ **🎓 Learning Mode (subscriptions only)**. Every row is an action
+or a read-out — there is nothing to switch on or off.
 
-| Row | Default |
+| Row | What it does |
 | --- | --- |
-| Enable Learning Mode | off (an existing install is never changed silently) |
-| Sync subscriptions now | — shows the channel count and last sync time |
-| View whitelisted channels | — read-only |
-| Filter Home, Search and Related | on |
-| Filter Shorts | on |
-| Hide unidentifiable videos | on (spec §14) |
-| Lock subscriptions | on |
-| One account only | on |
+| Always on | States what the mode does; not tappable |
+| Sync subscriptions now | Rebuilds the whitelist; shows the channel count, the last sync time, and the last failure reason when nothing has synced yet |
+| View whitelisted channels | Read-only list of the allowed channels |
+| Release the bound account | Clears the bound account and the whitelist, for use after signing out |
+
+Because there is no master switch, the hooks are always installed and the
+`NSUserDefaults` reads that used to sit on the per-element hot path are gone.
 
 ## 9. Off-device tests
 
