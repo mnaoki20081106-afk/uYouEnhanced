@@ -4,6 +4,7 @@
 #import "ColourOptionsController2.h"
 #import "SettingsKeys.h"
 #import "AppIconOptionsController.h"
+#import "LearningFilter.h"
 
 #define VERSION_STRING [[NSString stringWithFormat:@"%@", @(OS_STRINGIFY(TWEAK_VERSION))] stringByReplacingOccurrencesOfString:@"\"" withString:@""]
 #define SHOW_RELAUNCH_YT_SNACKBAR [[%c(GOOHUDManagerInternal) sharedInstance] showMessageMainThread:[%c(YTHUDMessage) messageWithText:LOC(@"RESTART_YOUTUBE")]]
@@ -304,6 +305,9 @@ extern NSBundle *uYouPlusBundle();
         }
     ];
     [sectionItems addObject:exitYT];
+
+    # pragma mark - Learning Mode (subscriptions-only whitelist)
+    LFAppendSettingsItems(sectionItems, settingsViewController);
 
     SECTION_HEADER(LOC(@"📺 App Personalization"));
     # pragma mark - uYouEnhanced Essential Menu
