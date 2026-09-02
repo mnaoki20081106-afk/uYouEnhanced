@@ -57,6 +57,7 @@ needs the `channelId`, so the scanner was rewritten around `UC…` ids (see §3)
 | `Sources/LearningFilterSettings.xm` | The settings rows. |
 | `Sources/uYouPlusSettings.xm` | One added call to `LFAppendSettingsItems()`. |
 | `Sources/SettingsKeys.h` | New keys added to the export/import list. |
+| `Tests/` | Off-device tests and their runner (§10). |
 
 ## 3. How a channel is identified
 
@@ -81,6 +82,11 @@ channels' names.
 The Shorts player takes a shortcut: `YTReelModel.playerResponseOverride
 .videoDetails.channelId` is authoritative and is used directly.
 
+Element payloads are populated lazily, so the first scan of a cell can come up
+short. An answer that names no channel is therefore *not* cached: it is parked
+for a second and rescanned, up to five times, before the tweak settles on it.
+Without that, one early scan would hide a subscribed video permanently.
+
 ## 4. Where the filter is applied
 
 | Surface | Hook |
@@ -99,10 +105,17 @@ own chrome) are never filtered: an item without a video id is skipped outright.
 
 The tweak has no credentials of its own, so it borrows the app's:
 
-1. `%hook NSURLSession` reads (never modifies) the headers of outgoing
-   `…/youtubei/v1/…` requests and caches `Authorization`, `X-Goog-AuthUser`,
-   `X-Goog-Visitor-Id`, `X-Goog-PageId`, the client name/version and the cookie
-   header.
+1. Two hooks watch outgoing requests and read (never modify) their headers,
+   caching `Authorization`, `X-Goog-AuthUser`, `X-Goog-Visitor-Id`,
+   `X-Goog-PageId`, the client name/version and the cookie header of any
+   `…/youtubei/v1/…` call:
+   * `NSMutableURLRequest` (`setValue:forHTTPHeaderField:`, `addValue:…`,
+     `setAllHTTPHeaderFields:`, `setURL:`) — catches the request while it is
+     being built, whichever stack ends up sending it;
+   * `NSURLSession` **and** `__NSURLSessionLocal` — `NSURLSession` is a class
+     cluster and the concrete subclass overrides the task factories, so hooking
+     only the public class would see nothing.
+   A cookie-authenticated request counts too: its headers are forwarded verbatim.
 2. With those headers it POSTs `browse` for `browseId: FEchannels` ("All
    subscriptions"), following up to 20 continuations. The iOS client context is
    tried first, then WEB.
@@ -111,7 +124,10 @@ The tweak has no credentials of its own, so it borrows the app's:
    body cannot be decoded as JSON at all, the raw `UC…` scan is the last resort.
 4. Results are persisted in `NSUserDefaults` under
    `learningModeSubscribedChannels` and refreshed at most every 6 hours (on
-   `UIApplicationDidBecomeActive`), or on demand from the settings row.
+   `UIApplicationDidBecomeActive`), or on demand from the settings row. The
+   first sync of a launch is kicked off as soon as usable credentials appear
+   (throttled to once a minute) rather than waiting for the next foreground
+   event, which happens before the app has made a signed-in request.
 
 Requests the tweak issues itself carry `X-uYE-LearningFilter: 1` so the hooks
 ignore them.
@@ -137,14 +153,19 @@ tampered with either.
 
 ## 7. One account
 
-`LFAccountGuard` binds the first authenticated identity it sees (`X-Goog-PageId`,
-falling back to `X-Goog-AuthUser`). Afterwards:
+`LFAccountGuard` binds the first authenticated identity it sees. That identity
+has two independent signals — `X-Goog-PageId` (the channel / brand account) and
+`X-Goog-AuthUser` (the slot index) — and they are compared **component-wise**,
+only when both sides carry the same signal. The app does not put both headers on
+every request, and treating a missing one as "someone else" would lock a
+perfectly legitimate single account out of its own app. Afterwards:
 
-* authenticated InnerTube requests carrying a *different* identity are refused,
-  which is what makes a second account non-functional rather than merely hidden;
+* authenticated InnerTube requests whose page id or auth-user *differs* from the
+  bound one are refused, which is what makes a second account non-functional
+  rather than merely hidden;
 * views whose accessibility identifier names an add-account / account-switcher
   control are hidden;
-* sign-out is never touched. Five consecutive unauthenticated `browse`/`player`
+* sign-out is never touched. Twenty consecutive unauthenticated `browse`/`player`
   calls are read as "signed out": the binding is released and the whitelist is
   cleared, so the next single account starts fresh. The settings row *Release the
   bound account* does the same on demand.
@@ -164,7 +185,29 @@ uYouEnhanced ▸ **🎓 Learning Mode (subscriptions only)**
 | Lock subscriptions | on |
 | One account only | on |
 
-## 9. Test plan
+## 9. Off-device tests
+
+`Tests/run-tests.sh` runs everything that can be checked without a device or a
+built tweak:
+
+* **`Tests/LearningFilterScanTests.c`** exercises `Sources/LearningFilterScan.m`
+  directly — id boundaries at the start and end of a buffer, ids embedded in
+  base64, the protobuf length prefix that separates a trustworthy match from a
+  chance one, over-long tokens, deduplication and the capacity limit.
+* **`Tests/LearningFilterLogicTests.m`** builds `LearningFilterCore.m` against a
+  host Foundation (the system one on macOS, GNUstep on Linux) and covers the
+  store, the allow/deny decision, the signed-out gate, strict mode, the
+  lazy-payload retry and the control identifiers.
+
+Both suites were mutation-checked: deliberately breaking the boundary checks,
+the strong-prefix rule, the allow/deny direction, the signed-out gate, strict
+mode or the retry cache makes them fail.
+
+The whole tree is also compile-checked against the real iOS SDK and the real
+`Tweaks/YouTubeHeader`, after running each `.xm` through `logos.pl` — the same
+front end theos uses.
+
+## 10. On-device test plan
 
 With channels **A** and **B** subscribed and **C** not:
 
@@ -192,7 +235,7 @@ Also verify:
    quality, downloads, theming and the Shorts/player options behave as before.
    Learning Mode adds hooks; it changes none of theirs.
 
-## 10. Known limits
+## 11. Known limits
 
 * The channel id is read out of a serialised element. If YouTube changes that
   encoding the scanner returns nothing, and with *Hide unidentifiable videos* on

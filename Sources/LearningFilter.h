@@ -150,7 +150,8 @@ static NSString *const kLFOwnRequestHeader = @"X-uYE-LearningFilter";
 - (BOOL)accountSlotTaken;
 - (void)resetBoundAccount;
 
-@property(nonatomic, readonly, copy, nullable) NSString *boundAccountIdentifier;
+/// Human-readable form of the bound identity, for the settings screen.
+- (nullable NSString *)boundAccountIdentifier;
 
 @end
 

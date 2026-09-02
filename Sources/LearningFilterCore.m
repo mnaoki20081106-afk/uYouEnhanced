@@ -2,6 +2,7 @@
 // the channel-id extraction used by every hooked surface.
 
 #import "LearningFilter.h"
+#import "LearningFilterScan.h"
 #import <objc/runtime.h>
 
 #pragma mark - Small reflection helpers
@@ -60,11 +61,13 @@ static BOOL LFIsChannelId(NSString *value) {
 
 #pragma mark - LFSubscriptionStore
 
-@interface LFSubscriptionStore ()
-@property(nonatomic, strong) NSMutableArray<NSDictionary<NSString *, NSString *> *> *storage;
-@property(nonatomic, strong) NSMutableSet<NSString *> *idSet;
-@property(nonatomic, strong) NSMutableSet<NSString *> *nameSet;
-@end
+// The store is a singleton, so its state lives at file scope rather than in
+// properties: private, and it keeps this file buildable by the off-device tests
+// in Tests/ (see Tests/run-tests.sh). All access goes through @synchronized on
+// the shared instance.
+static NSMutableArray<NSDictionary<NSString *, NSString *> *> *sStorage;
+static NSMutableSet<NSString *> *sIdSet;
+static NSMutableSet<NSString *> *sNameSet;
 
 @implementation LFSubscriptionStore
 
@@ -78,9 +81,9 @@ static BOOL LFIsChannelId(NSString *value) {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _storage = [NSMutableArray array];
-        _idSet = [NSMutableSet set];
-        _nameSet = [NSMutableSet set];
+        sStorage = [NSMutableArray array];
+        sIdSet = [NSMutableSet set];
+        sNameSet = [NSMutableSet set];
         [self loadFromDefaults];
     }
     return self;
@@ -96,42 +99,42 @@ static BOOL LFIsChannelId(NSString *value) {
 - (void)ingest:(NSArray *)channels replacing:(BOOL)replacing persist:(BOOL)persist {
     @synchronized(self) {
         if (replacing) {
-            [self.storage removeAllObjects];
-            [self.idSet removeAllObjects];
-            [self.nameSet removeAllObjects];
+            [sStorage removeAllObjects];
+            [sIdSet removeAllObjects];
+            [sNameSet removeAllObjects];
         }
 
         for (id entry in channels) {
             if (![entry isKindOfClass:[NSDictionary class]])
                 continue;
-            NSString *channelId = entry[@"id"];
-            NSString *name = entry[@"name"];
+            NSString *channelId = [entry objectForKey:@"id"];
+            NSString *name = [entry objectForKey:@"name"];
             if (![channelId isKindOfClass:[NSString class]] || !LFIsChannelId(channelId))
                 continue;
             if (![name isKindOfClass:[NSString class]])
                 name = @"";
 
-            if ([self.idSet containsObject:channelId]) {
+            if ([sIdSet containsObject:channelId]) {
                 if (name.length == 0)
                     continue;
                 // Upgrade a previously name-less entry.
-                NSUInteger index = [self.storage indexOfObjectPassingTest:^BOOL(NSDictionary *obj, NSUInteger idx, BOOL *stop) {
-                    return [obj[@"id"] isEqualToString:channelId];
+                NSUInteger index = [sStorage indexOfObjectPassingTest:^BOOL(NSDictionary *obj, NSUInteger idx, BOOL *stop) {
+                    return [[obj objectForKey:@"id"] isEqualToString:channelId];
                 }];
-                if (index != NSNotFound && [self.storage[index][@"name"] length] == 0)
-                    self.storage[index] = @{@"id": channelId, @"name": name};
+                if (index != NSNotFound && [[[sStorage objectAtIndex:index] objectForKey:@"name"] length] == 0)
+                    [sStorage replaceObjectAtIndex:index withObject:@{@"id": channelId, @"name": name}];
             } else {
-                [self.storage addObject:@{@"id": channelId, @"name": name}];
-                [self.idSet addObject:channelId];
+                [sStorage addObject:@{@"id": channelId, @"name": name}];
+                [sIdSet addObject:channelId];
             }
 
             NSString *normalized = LFNormalizedName(name);
             if (normalized)
-                [self.nameSet addObject:normalized];
+                [sNameSet addObject:normalized];
         }
 
         if (persist) {
-            [[NSUserDefaults standardUserDefaults] setObject:[self.storage copy] forKey:kLFStoredChannels];
+            [[NSUserDefaults standardUserDefaults] setObject:[sStorage copy] forKey:kLFStoredChannels];
             [[NSUserDefaults standardUserDefaults] setObject:[NSDate date] forKey:kLFLastSyncDate];
         }
     }
@@ -139,13 +142,13 @@ static BOOL LFIsChannelId(NSString *value) {
 
 - (NSArray<NSDictionary<NSString *, NSString *> *> *)channels {
     @synchronized(self) {
-        return [self.storage copy];
+        return [sStorage copy];
     }
 }
 
 - (NSUInteger)count {
     @synchronized(self) {
-        return self.storage.count;
+        return sStorage.count;
     }
 }
 
@@ -162,7 +165,7 @@ static BOOL LFIsChannelId(NSString *value) {
     if (![channelId isKindOfClass:[NSString class]] || channelId.length == 0)
         return NO;
     @synchronized(self) {
-        return [self.idSet containsObject:channelId];
+        return [sIdSet containsObject:channelId];
     }
 }
 
@@ -171,7 +174,7 @@ static BOOL LFIsChannelId(NSString *value) {
     if (!normalized)
         return NO;
     @synchronized(self) {
-        return [self.nameSet containsObject:normalized];
+        return [sNameSet containsObject:normalized];
     }
 }
 
@@ -185,9 +188,9 @@ static BOOL LFIsChannelId(NSString *value) {
 
 - (void)reset {
     @synchronized(self) {
-        [self.storage removeAllObjects];
-        [self.idSet removeAllObjects];
-        [self.nameSet removeAllObjects];
+        [sStorage removeAllObjects];
+        [sIdSet removeAllObjects];
+        [sNameSet removeAllObjects];
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:kLFStoredChannels];
         [[NSUserDefaults standardUserDefaults] removeObjectForKey:kLFLastSyncDate];
     }
@@ -219,7 +222,7 @@ LFDecision LFDecisionForInfo(NSDictionary *info) {
     if (![info isKindOfClass:[NSDictionary class]])
         return LFDecisionUnknown;
 
-    NSSet<NSString *> *channelIds = info[LFInfoChannelIds];
+    NSSet<NSString *> *channelIds = [info objectForKey:LFInfoChannelIds];
     if ([channelIds isKindOfClass:[NSSet class]] && channelIds.count > 0) {
         for (NSString *channelId in channelIds) {
             if (LFIsAllowedChannel(channelId))
@@ -228,7 +231,7 @@ LFDecision LFDecisionForInfo(NSDictionary *info) {
         return LFDecisionHide;
     }
 
-    NSString *channelName = info[LFInfoChannelName];
+    NSString *channelName = [info objectForKey:LFInfoChannelName];
     if ([channelName isKindOfClass:[NSString class]] && channelName.length > 0)
         return [[LFSubscriptionStore sharedStore] isSubscribedToChannelName:channelName] ? LFDecisionAllow
                                                                                          : LFDecisionHide;
@@ -249,93 +252,35 @@ BOOL LFShouldHideInfo(NSDictionary *info) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:kLFStrictUnknown];
 }
 
-#pragma mark - Byte scanning
+#pragma mark - Payload scanning
 
-static inline BOOL LFIsIdByte(uint8_t byte) {
-    return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9') ||
-           byte == '-' || byte == '_';
-}
+// The scanning itself lives in LearningFilterScan.m (pure C) so it can be
+// exercised by Tests/LearningFilterScanTests.c without a device. Everything
+// below only converts its results into the Foundation types used above.
 
-static NSUInteger LFFindBytes(const uint8_t *haystack, NSUInteger haystackLength, const char *needle,
-                              NSUInteger needleLength, NSUInteger from) {
-    if (needleLength == 0 || haystackLength < needleLength)
-        return NSNotFound;
-    for (NSUInteger index = from; index + needleLength <= haystackLength; index++) {
-        if (memcmp(haystack + index, needle, needleLength) == 0)
-            return index;
+static NSUInteger const kLFMaxScannedBytes = 262144;
+static size_t const kLFMaxIds = 64;
+
+static NSSet<NSString *> *LFChannelIdSetFromBytes(const uint8_t *bytes, size_t length) {
+    LFScanChannelId found[kLFMaxIds];
+    size_t strongCount = 0;
+    size_t count = LFScanChannelIds(bytes, length, found, kLFMaxIds, &strongCount);
+    if (count == 0)
+        return [NSSet set];
+
+    NSMutableSet<NSString *> *identifiers = [NSMutableSet set];
+    for (size_t index = 0; index < count; index++) {
+        // When any protobuf-prefixed id is present the unprefixed ones are
+        // discarded: those are the ones that can be base64 noise.
+        if (strongCount > 0 && !found[index].strong)
+            continue;
+        NSString *identifier = [[NSString alloc] initWithBytes:found[index].value
+                                                        length:LF_CHANNEL_ID_LENGTH
+                                                      encoding:NSUTF8StringEncoding];
+        if (identifier.length == LF_CHANNEL_ID_LENGTH)
+            [identifiers addObject:identifier];
     }
-    return NSNotFound;
-}
-
-/// Returns YES when at least one id was found behind `prefix`.
-static BOOL LFCollectVideoIdsAfterPrefix(const uint8_t *bytes, NSUInteger length, const char *prefix,
-                                         NSMutableSet<NSString *> *videoIds) {
-    BOOL found = NO;
-    NSUInteger prefixLength = strlen(prefix);
-    NSUInteger cursor = 0;
-    while (cursor + prefixLength + 11 <= length) {
-        NSUInteger match = LFFindBytes(bytes, length, prefix, prefixLength, cursor);
-        if (match == NSNotFound)
-            return found;
-        NSUInteger start = match + prefixLength;
-        if (start + 11 > length)
-            return found;
-
-        BOOL valid = YES;
-        for (NSUInteger offset = 0; offset < 11; offset++) {
-            if (!LFIsIdByte(bytes[start + offset])) {
-                valid = NO;
-                break;
-            }
-        }
-        if (valid && (start + 11 == length || !LFIsIdByte(bytes[start + 11]))) {
-            NSString *videoId = [[NSString alloc] initWithBytes:bytes + start length:11 encoding:NSUTF8StringEncoding];
-            if (videoId.length == 11) {
-                [videoIds addObject:videoId];
-                found = YES;
-            }
-        }
-        cursor = match + prefixLength;
-    }
-    return found;
-}
-
-/// Collects `UC…` channel ids. A protobuf string field of length 24 is preceded
-/// by the byte 0x18, which makes those matches far more trustworthy than an
-/// accidental hit inside a base64 continuation token; when any such "strong"
-/// match exists the weaker ones are discarded.
-static NSSet<NSString *> *LFCollectChannelIds(const uint8_t *bytes, NSUInteger length) {
-    NSMutableSet<NSString *> *strong = [NSMutableSet set];
-    NSMutableSet<NSString *> *weak = [NSMutableSet set];
-
-    for (NSUInteger index = 0; index + 24 <= length; index++) {
-        if (bytes[index] != 'U' || bytes[index + 1] != 'C')
-            continue;
-        if (index > 0 && LFIsIdByte(bytes[index - 1]))
-            continue;
-        if (index + 24 < length && LFIsIdByte(bytes[index + 24]))
-            continue;
-
-        BOOL valid = YES;
-        for (NSUInteger offset = 2; offset < 24; offset++) {
-            if (!LFIsIdByte(bytes[index + offset])) {
-                valid = NO;
-                break;
-            }
-        }
-        if (!valid)
-            continue;
-
-        NSString *channelId = [[NSString alloc] initWithBytes:bytes + index length:24 encoding:NSUTF8StringEncoding];
-        if (channelId.length != 24)
-            continue;
-        if (index > 0 && bytes[index - 1] == 0x18)
-            [strong addObject:channelId];
-        else
-            [weak addObject:channelId];
-    }
-
-    return strong.count > 0 ? [strong copy] : [weak copy];
+    return [identifiers copy];
 }
 
 NSDictionary *LFInfoFromData(NSData *data) {
@@ -343,36 +288,40 @@ NSDictionary *LFInfoFromData(NSData *data) {
         return nil;
 
     const uint8_t *bytes = data.bytes;
-    NSUInteger length = MIN(data.length, (NSUInteger)262144);
+    size_t length = (size_t)MIN(data.length, kLFMaxScannedBytes);
+
+    LFScanVideoId videos[kLFMaxIds];
+    size_t videoCount = 0;
+    int fromShortsPath = 0;
+    videoCount = LFScanVideoIdsAfterPrefix(bytes, length, "https://i.ytimg.com/vi/", videos, videoCount, kLFMaxIds,
+                                           NULL);
+    videoCount = LFScanVideoIdsAfterPrefix(bytes, length, "https://i.ytimg.com/vi_webp/", videos, videoCount,
+                                           kLFMaxIds, NULL);
+    videoCount = LFScanVideoIdsAfterPrefix(bytes, length, "/shorts/", videos, videoCount, kLFMaxIds, &fromShortsPath);
+    videoCount = LFScanVideoIdsAfterPrefix(bytes, length, "watch?v=", videos, videoCount, kLFMaxIds, NULL);
 
     NSMutableSet<NSString *> *videoIds = [NSMutableSet set];
-    LFCollectVideoIdsAfterPrefix(bytes, length, "https://i.ytimg.com/vi/", videoIds);
-    LFCollectVideoIdsAfterPrefix(bytes, length, "https://i.ytimg.com/vi_webp/", videoIds);
-    BOOL isShort = LFCollectVideoIdsAfterPrefix(bytes, length, "/shorts/", videoIds);
-    LFCollectVideoIdsAfterPrefix(bytes, length, "watch?v=", videoIds);
-
-    if (!isShort) {
-        static const char *shortsMarkers[] = {"shorts_video_cell", "reel_item", "shorts_shelf"};
-        for (NSUInteger index = 0; index < sizeof(shortsMarkers) / sizeof(shortsMarkers[0]); index++) {
-            const char *marker = shortsMarkers[index];
-            if (LFFindBytes(bytes, length, marker, strlen(marker), 0) != NSNotFound) {
-                isShort = YES;
-                break;
-            }
-        }
+    for (size_t index = 0; index < videoCount; index++) {
+        NSString *videoId = [[NSString alloc] initWithBytes:videos[index].value
+                                                     length:LF_VIDEO_ID_LENGTH
+                                                   encoding:NSUTF8StringEncoding];
+        if (videoId.length == LF_VIDEO_ID_LENGTH)
+            [videoIds addObject:videoId];
     }
 
-    NSSet<NSString *> *channelIds = LFCollectChannelIds(bytes, length);
+    BOOL isShort = fromShortsPath || LFScanLooksLikeShorts(bytes, length);
+    NSSet<NSString *> *channelIds = LFChannelIdSetFromBytes(bytes, length);
     if (videoIds.count == 0 && channelIds.count == 0)
         return nil;
 
     return @{LFInfoVideoIds: [videoIds copy], LFInfoChannelIds: channelIds, LFInfoIsShort: @(isShort)};
 }
 
+
 NSSet<NSString *> *LFChannelIdsInData(NSData *data) {
     if (![data isKindOfClass:[NSData class]] || data.length == 0)
         return [NSSet set];
-    return LFCollectChannelIds(data.bytes, MIN(data.length, (NSUInteger)8388608));
+    return LFChannelIdSetFromBytes(data.bytes, (size_t)MIN(data.length, (NSUInteger)8388608));
 }
 
 NSDictionary *LFInfoFromString(NSString *text) {
@@ -389,25 +338,26 @@ static NSDictionary *LFMergeInfo(NSDictionary *lhs, NSDictionary *rhs) {
         return lhs;
 
     NSMutableSet *videoIds = [NSMutableSet set];
-    [videoIds unionSet:lhs[LFInfoVideoIds] ?: [NSSet set]];
-    [videoIds unionSet:rhs[LFInfoVideoIds] ?: [NSSet set]];
+    [videoIds unionSet:[lhs objectForKey:LFInfoVideoIds] ?: [NSSet set]];
+    [videoIds unionSet:[rhs objectForKey:LFInfoVideoIds] ?: [NSSet set]];
 
     NSMutableSet *channelIds = [NSMutableSet set];
-    [channelIds unionSet:lhs[LFInfoChannelIds] ?: [NSSet set]];
-    [channelIds unionSet:rhs[LFInfoChannelIds] ?: [NSSet set]];
+    [channelIds unionSet:[lhs objectForKey:LFInfoChannelIds] ?: [NSSet set]];
+    [channelIds unionSet:[rhs objectForKey:LFInfoChannelIds] ?: [NSSet set]];
 
     NSMutableDictionary *merged = [NSMutableDictionary dictionary];
-    merged[LFInfoVideoIds] = [videoIds copy];
-    merged[LFInfoChannelIds] = [channelIds copy];
-    merged[LFInfoIsShort] = @([lhs[LFInfoIsShort] boolValue] || [rhs[LFInfoIsShort] boolValue]);
-    NSString *name = lhs[LFInfoChannelName] ?: rhs[LFInfoChannelName];
+    [merged setObject:[videoIds copy] forKey:LFInfoVideoIds];
+    [merged setObject:[channelIds copy] forKey:LFInfoChannelIds];
+    [merged setObject:@([[lhs objectForKey:LFInfoIsShort] boolValue] || [[rhs objectForKey:LFInfoIsShort] boolValue])
+                forKey:LFInfoIsShort];
+    NSString *name = [lhs objectForKey:LFInfoChannelName] ?: [rhs objectForKey:LFInfoChannelName];
     if (name)
-        merged[LFInfoChannelName] = name;
+        [merged setObject:name forKey:LFInfoChannelName];
     return [merged copy];
 }
 
 BOOL LFInfoIsSingleVideoLockup(NSDictionary *info) {
-    NSSet *videoIds = info[LFInfoVideoIds];
+    NSSet *videoIds = [info objectForKey:LFInfoVideoIds];
     return [videoIds isKindOfClass:[NSSet class]] && videoIds.count == 1;
 }
 
@@ -423,8 +373,23 @@ static NSMapTable *LFInfoCache(void) {
     return cache;
 }
 
-// Sentinel stored for objects that carry nothing identifiable, so we do not
-// rescan them on every layout pass.
+// Element payloads are populated lazily, so the first scan of a node can come up
+// short. Caching that permanently would hide the item for good once strict mode
+// is on, so an incomplete answer is parked here and retried a few times instead.
+static NSMapTable *LFPendingCache(void) {
+    static NSMapTable *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsWeakMemory
+                                      valueOptions:NSPointerFunctionsStrongMemory];
+    });
+    return cache;
+}
+
+static NSTimeInterval const kLFRetryInterval = 1.0;
+static NSUInteger const kLFMaxScanAttempts = 5;
+
+/// Sentinel for "scanned, definitively nothing here".
 static NSDictionary *LFEmptyInfo(void) {
     static NSDictionary *empty;
     static dispatch_once_t onceToken;
@@ -432,19 +397,69 @@ static NSDictionary *LFEmptyInfo(void) {
     return empty;
 }
 
-static NSDictionary *LFCachedInfo(id object) {
+/// An answer is only worth keeping once it identifies a channel; anything less
+/// is a scan that may still improve on the next pass.
+static BOOL LFInfoIsComplete(NSDictionary *info) {
+    if (!info)
+        return NO;
+    return [[info objectForKey:LFInfoChannelIds] count] > 0 ||
+           [[info objectForKey:LFInfoChannelName] length] > 0;
+}
+
+/// YES when a cached answer exists; `info` then holds it (possibly nil).
+static BOOL LFLookupCachedInfo(id object, NSDictionary **info) {
     if (!object)
-        return nil;
+        return NO;
+
     @synchronized(LFInfoCache()) {
-        return [LFInfoCache() objectForKey:object];
+        NSDictionary *cached = [LFInfoCache() objectForKey:object];
+        if (cached) {
+            *info = cached.count > 0 ? cached : nil;
+            return YES;
+        }
+
+        NSDictionary *pending = [LFPendingCache() objectForKey:object];
+        if (!pending)
+            return NO;
+
+        NSDictionary *partial = [pending objectForKey:@"info"];
+        NSUInteger attempts = [[pending objectForKey:@"attempts"] unsignedIntegerValue];
+        NSTimeInterval recorded = [[pending objectForKey:@"time"] doubleValue];
+        BOOL exhausted = attempts >= kLFMaxScanAttempts;
+        if (exhausted || [NSDate timeIntervalSinceReferenceDate] - recorded < kLFRetryInterval) {
+            *info = partial.count > 0 ? partial : nil;
+            return YES;
+        }
+        return NO; // stale and retries left: scan again
     }
 }
 
-static void LFCacheInfo(id object, NSDictionary *info) {
+static void LFRecordInfo(id object, NSDictionary *info) {
     if (!object)
         return;
+
     @synchronized(LFInfoCache()) {
-        [LFInfoCache() setObject:info ?: LFEmptyInfo() forKey:object];
+        if (LFInfoIsComplete(info)) {
+            [LFInfoCache() setObject:info forKey:object];
+            [LFPendingCache() removeObjectForKey:object];
+            return;
+        }
+
+        NSDictionary *pending = [LFPendingCache() objectForKey:object];
+        NSUInteger attempts = [[pending objectForKey:@"attempts"] unsignedIntegerValue] + 1;
+        if (attempts >= kLFMaxScanAttempts) {
+            // Give up rescanning; remember whatever the last pass produced.
+            [LFInfoCache() setObject:info ?: LFEmptyInfo() forKey:object];
+            [LFPendingCache() removeObjectForKey:object];
+            return;
+        }
+
+        [LFPendingCache() setObject:@{
+            @"info": info ?: LFEmptyInfo(),
+            @"attempts": @(attempts),
+            @"time": @([NSDate timeIntervalSinceReferenceDate])
+        }
+                             forKey:object];
     }
 }
 
@@ -477,9 +492,9 @@ static NSDictionary *LFInfoFromRendererUncached(id renderer, NSData *payload) {
     if ([data isKindOfClass:[NSData class]])
         info = LFInfoFromData(data);
 
-    NSSet *channelIds = info[LFInfoChannelIds];
+    NSSet *channelIds = [info objectForKey:LFInfoChannelIds];
     BOOL needsDescription = (![channelIds isKindOfClass:[NSSet class]] || channelIds.count == 0) &&
-                            [info[LFInfoVideoIds] count] > 0;
+                            [[info objectForKey:LFInfoVideoIds] count] > 0;
     if (needsDescription && !LFDescribing) {
         LFDescribing = YES;
         @try {
@@ -492,7 +507,7 @@ static NSDictionary *LFInfoFromRendererUncached(id renderer, NSData *payload) {
     NSString *name = LFChannelNameFromObject(renderer);
     if (name && info) {
         NSMutableDictionary *mutable = [info mutableCopy];
-        mutable[LFInfoChannelName] = name;
+        [mutable setObject:name forKey:LFInfoChannelName];
         info = [mutable copy];
     }
     return info;
@@ -502,16 +517,16 @@ NSDictionary *LFInfoForRenderer(id renderer, NSData *data) {
     if (!renderer)
         return nil;
 
-    NSDictionary *cached = LFCachedInfo(renderer);
-    if (cached)
-        return cached.count > 0 ? cached : nil;
+    NSDictionary *cached = nil;
+    if (LFLookupCachedInfo(renderer, &cached))
+        return cached;
 
     NSDictionary *info = nil;
     @try {
         info = LFInfoFromRendererUncached(renderer, data);
     } @catch (__unused NSException *exception) {
     }
-    LFCacheInfo(renderer, info);
+    LFRecordInfo(renderer, info);
     return info;
 }
 
@@ -545,9 +560,9 @@ NSDictionary *LFInfoFromNode(id node) {
     if (!node)
         return nil;
 
-    NSDictionary *cached = LFCachedInfo(node);
-    if (cached)
-        return cached.count > 0 ? cached : nil;
+    NSDictionary *cached = nil;
+    if (LFLookupCachedInfo(node, &cached))
+        return cached;
 
     NSDictionary *info = nil;
     @try {
@@ -564,13 +579,13 @@ NSDictionary *LFInfoFromNode(id node) {
         NSString *name = LFChannelNameFromObject(node);
         if (name) {
             NSMutableDictionary *mutable = info ? [info mutableCopy] : [NSMutableDictionary dictionary];
-            mutable[LFInfoChannelName] = name;
+            [mutable setObject:name forKey:LFInfoChannelName];
             info = [mutable copy];
         }
     } @catch (__unused NSException *exception) {
     }
 
-    LFCacheInfo(node, info);
+    LFRecordInfo(node, info);
     return info;
 }
 
@@ -579,17 +594,7 @@ NSDictionary *LFInfoFromNode(id node) {
 BOOL LFDataLooksLikeSubscribeControl(NSData *data) {
     if (![data isKindOfClass:[NSData class]] || data.length == 0)
         return NO;
-
-    const uint8_t *bytes = data.bytes;
-    NSUInteger length = MIN(data.length, (NSUInteger)262144);
-    static const char *needles[] = {"subscribe_button", "compact_subscribe", "subscription_button",
-                                    "subscribe_button_view_model"};
-    for (NSUInteger index = 0; index < sizeof(needles) / sizeof(needles[0]); index++) {
-        const char *needle = needles[index];
-        if (LFFindBytes(bytes, length, needle, strlen(needle), 0) != NSNotFound)
-            return YES;
-    }
-    return NO;
+    return LFScanLooksLikeSubscribeControl(data.bytes, (size_t)MIN(data.length, kLFMaxScannedBytes)) ? YES : NO;
 }
 
 BOOL LFIsSubscriptionMutationURL(NSURL *url) {

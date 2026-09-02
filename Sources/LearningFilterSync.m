@@ -11,6 +11,8 @@
 static NSString *const kLFInnerTubeBrowseURL = @"https://youtubei.googleapis.com/youtubei/v1/browse?prettyPrint=false";
 static NSTimeInterval const kLFSyncInterval = 6 * 60 * 60; // 6 hours
 static NSUInteger const kLFMaxContinuations = 20;
+// How many consecutive unauthenticated content calls count as "signed out".
+static NSUInteger const kLFSignedOutStreak = 20;
 
 static NSArray<NSString *> *LFForwardedHeaderFields(void) {
     static NSArray *fields;
@@ -37,6 +39,15 @@ static BOOL LFIsInnerTubeRequest(NSURLRequest *request) {
 
 static BOOL LFIsOwnRequest(NSURLRequest *request) {
     return LFHeader(request, kLFOwnRequestHeader) != nil;
+}
+
+/// The app normally sends a bearer token, but a cookie-authenticated request
+/// carries the same identity and its headers can be forwarded verbatim.
+static BOOL LFRequestIsAuthenticated(NSURLRequest *request) {
+    if (LFHeader(request, @"Authorization"))
+        return YES;
+    NSString *cookie = LFHeader(request, @"Cookie");
+    return cookie && [cookie containsString:@"SAPISID"];
 }
 
 #pragma mark - JSON helpers
@@ -167,6 +178,7 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
 @property(nonatomic, assign) BOOL syncing;
 @property(nonatomic, copy) NSString *statusDescription;
 @property(nonatomic, strong) NSURLSession *session;
+@property(nonatomic, strong) NSDate *lastAttemptDate;
 @end
 
 @implementation LFSubscriptionSync
@@ -193,7 +205,7 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
 - (void)captureRequest:(NSURLRequest *)request {
     if (![request isKindOfClass:[NSURLRequest class]] || LFIsOwnRequest(request) || !LFIsInnerTubeRequest(request))
         return;
-    if (!LFHeader(request, @"Authorization"))
+    if (!LFRequestIsAuthenticated(request))
         return; // Only authenticated requests carry a usable identity.
 
     NSMutableDictionary *headers = [NSMutableDictionary dictionary];
@@ -211,6 +223,26 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
         if (version.length > 0)
             self.clientVersion = version;
     }
+
+    // Without this the first sync would wait for the next foreground event,
+    // which at launch happens before any signed-in request has been made.
+    [self syncAfterCapture];
+}
+
+- (void)syncAfterCapture {
+    NSDate *lastAttempt = nil;
+    @synchronized(self) {
+        if (self.syncing)
+            return;
+        lastAttempt = self.lastAttemptDate;
+    }
+    if (lastAttempt && [[NSDate date] timeIntervalSinceDate:lastAttempt] < 60)
+        return;
+
+    @synchronized(self) {
+        self.lastAttemptDate = [NSDate date];
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ [self syncIfStale]; });
 }
 
 - (BOOL)hasCredentials {
@@ -242,12 +274,14 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
 
     NSMutableURLRequest *request =
         [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kLFInnerTubeBrowseURL]];
+    // Stamp the marker first: the networking hooks inspect a request as soon as
+    // an identity header lands on it, and must recognise this one as our own.
+    [request setValue:@"1" forHTTPHeaderField:kLFOwnRequestHeader];
     request.HTTPMethod = @"POST";
     request.HTTPBody = payload;
     for (NSString *field in headers)
         [request setValue:headers[field] forHTTPHeaderField:field];
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [request setValue:@"1" forHTTPHeaderField:kLFOwnRequestHeader];
     return request;
 }
 
@@ -423,8 +457,18 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
 
 #pragma mark - LFAccountGuard
 
+// An account is identified by two independent signals: `X-Goog-PageId` names the
+// channel / brand account, `X-Goog-AuthUser` is the slot index. They are compared
+// component-wise and only when *both* sides carry the same signal — the app does
+// not put both headers on every request, and treating a missing one as "someone
+// else" would lock a perfectly legitimate single account out of its own app.
+
+static NSString *const kLFBoundPageIdKey = @"pageId";
+static NSString *const kLFBoundAuthUserKey = @"authUser";
+
 @interface LFAccountGuard ()
-@property(nonatomic, copy) NSString *boundAccountIdentifier;
+@property(nonatomic, copy) NSString *boundPageId;
+@property(nonatomic, copy) NSString *boundAuthUser;
 @property(nonatomic, assign) NSUInteger signedOutStreak;
 @end
 
@@ -440,51 +484,78 @@ static void LFCollectChannels(id json, NSMutableDictionary<NSString *, NSString 
 - (instancetype)init {
     self = [super init];
     if (self) {
-        id stored = [[NSUserDefaults standardUserDefaults] stringForKey:kLFBoundAccount];
-        if ([stored isKindOfClass:[NSString class]])
-            _boundAccountIdentifier = stored;
+        id stored = [[NSUserDefaults standardUserDefaults] objectForKey:kLFBoundAccount];
+        if ([stored isKindOfClass:[NSDictionary class]]) {
+            id pageId = stored[kLFBoundPageIdKey];
+            id authUser = stored[kLFBoundAuthUserKey];
+            if ([pageId isKindOfClass:[NSString class]])
+                _boundPageId = pageId;
+            if ([authUser isKindOfClass:[NSString class]])
+                _boundAuthUser = authUser;
+        }
     }
     return self;
 }
 
-/// Stable-ish identity for the account behind a request. `X-Goog-PageId` names
-/// the channel/brand account; `X-Goog-AuthUser` is the slot index and is the
-/// fallback when no page id is present.
-static NSString *LFIdentityForRequest(NSURLRequest *request) {
-    NSString *pageId = LFHeader(request, @"X-Goog-PageId");
-    if (pageId.length > 0)
-        return [@"page:" stringByAppendingString:pageId];
-    NSString *authUser = LFHeader(request, @"X-Goog-AuthUser");
-    if (authUser.length > 0)
-        return [@"authuser:" stringByAppendingString:authUser];
-    return nil;
+- (void)persist {
+    NSMutableDictionary *stored = [NSMutableDictionary dictionary];
+    if (self.boundPageId.length > 0)
+        stored[kLFBoundPageIdKey] = self.boundPageId;
+    if (self.boundAuthUser.length > 0)
+        stored[kLFBoundAuthUserKey] = self.boundAuthUser;
+    if (stored.count > 0)
+        [[NSUserDefaults standardUserDefaults] setObject:stored forKey:kLFBoundAccount];
+    else
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:kLFBoundAccount];
+}
+
+- (NSString *)boundAccountIdentifier {
+    @synchronized(self) {
+        if (self.boundPageId.length > 0)
+            return [@"page:" stringByAppendingString:self.boundPageId];
+        if (self.boundAuthUser.length > 0)
+            return [@"authuser:" stringByAppendingString:self.boundAuthUser];
+        return nil;
+    }
 }
 
 - (void)noteRequest:(NSURLRequest *)request {
     if (![request isKindOfClass:[NSURLRequest class]] || LFIsOwnRequest(request) || !LFIsInnerTubeRequest(request))
         return;
 
-    if (!LFHeader(request, @"Authorization")) {
+    if (!LFRequestIsAuthenticated(request)) {
         NSString *url = request.URL.absoluteString;
         // Only genuine content calls count towards "the user signed out".
         if ([url containsString:@"/youtubei/v1/browse"] || [url containsString:@"/youtubei/v1/player"]) {
+            BOOL shouldRelease = NO;
             @synchronized(self) {
-                if (self.boundAccountIdentifier && ++self.signedOutStreak >= 5)
-                    [self resetBoundAccount];
+                if (self.boundPageId.length > 0 || self.boundAuthUser.length > 0)
+                    shouldRelease = ++self.signedOutStreak >= kLFSignedOutStreak;
             }
+            if (shouldRelease)
+                [self resetBoundAccount];
         }
         return;
     }
 
+    NSString *pageId = LFHeader(request, @"X-Goog-PageId");
+    NSString *authUser = LFHeader(request, @"X-Goog-AuthUser");
+
     @synchronized(self) {
         self.signedOutStreak = 0;
-        if (self.boundAccountIdentifier)
-            return;
-        NSString *identity = LFIdentityForRequest(request);
-        if (identity.length == 0)
-            return;
-        self.boundAccountIdentifier = identity;
-        [[NSUserDefaults standardUserDefaults] setObject:identity forKey:kLFBoundAccount];
+        BOOL changed = NO;
+        // Learn each signal the first time it is seen; never overwrite one that
+        // is already bound, otherwise a second account would rebind the guard.
+        if (pageId.length > 0 && self.boundPageId.length == 0) {
+            self.boundPageId = pageId;
+            changed = YES;
+        }
+        if (authUser.length > 0 && self.boundAuthUser.length == 0) {
+            self.boundAuthUser = authUser;
+            changed = YES;
+        }
+        if (changed)
+            [self persist];
     }
 }
 
@@ -493,29 +564,33 @@ static NSString *LFIdentityForRequest(NSURLRequest *request) {
         return NO;
     if (![request isKindOfClass:[NSURLRequest class]] || LFIsOwnRequest(request) || !LFIsInnerTubeRequest(request))
         return NO;
-    if (!LFHeader(request, @"Authorization"))
+    if (!LFRequestIsAuthenticated(request))
         return NO;
 
-    NSString *identity = LFIdentityForRequest(request);
-    if (identity.length == 0)
-        return NO;
+    NSString *pageId = LFHeader(request, @"X-Goog-PageId");
+    NSString *authUser = LFHeader(request, @"X-Goog-AuthUser");
 
     @synchronized(self) {
-        return self.boundAccountIdentifier.length > 0 && ![self.boundAccountIdentifier isEqualToString:identity];
+        if (pageId.length > 0 && self.boundPageId.length > 0 && ![pageId isEqualToString:self.boundPageId])
+            return YES;
+        if (authUser.length > 0 && self.boundAuthUser.length > 0 && ![authUser isEqualToString:self.boundAuthUser])
+            return YES;
+        return NO;
     }
 }
 
 - (BOOL)accountSlotTaken {
     @synchronized(self) {
-        return self.boundAccountIdentifier.length > 0;
+        return self.boundPageId.length > 0 || self.boundAuthUser.length > 0;
     }
 }
 
 - (void)resetBoundAccount {
     @synchronized(self) {
-        self.boundAccountIdentifier = nil;
+        self.boundPageId = nil;
+        self.boundAuthUser = nil;
         self.signedOutStreak = 0;
-        [[NSUserDefaults standardUserDefaults] removeObjectForKey:kLFBoundAccount];
+        [self persist];
     }
     // The whitelist belonged to that account; without it Whitelist Mode has no
     // input and must go inert rather than hide everything (spec §9).

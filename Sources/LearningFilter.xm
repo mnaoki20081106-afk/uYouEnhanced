@@ -38,17 +38,10 @@
 - (id)makeContentModelForEntry:(id)entry;
 @end
 
-#pragma mark - Shared decision helper
+@interface __NSURLSessionLocal : NSURLSession
+@end
 
-/// Applies the whitelist to a feed item. Anything that is not recognisable as a
-/// video is left untouched so headers, chips and shelves keep working.
-static BOOL LFShouldHideVideoInfo(NSDictionary *info) {
-    if (!LFFilteringActive())
-        return NO;
-    if ([info[LFInfoVideoIds] count] == 0)
-        return NO;
-    return LFShouldHideInfo(info);
-}
+#pragma mark - Shared decision helper
 
 static BOOL LFFeedFilteringEnabled(void) {
     return LFFilteringActive() && [[NSUserDefaults standardUserDefaults] boolForKey:kLFFilterFeeds];
@@ -56,6 +49,24 @@ static BOOL LFFeedFilteringEnabled(void) {
 
 static BOOL LFShortsFilteringEnabled(void) {
     return LFFilteringActive() && [[NSUserDefaults standardUserDefaults] boolForKey:kLFFilterShorts];
+}
+
+static BOOL LFAnyFeedFilteringEnabled(void) {
+    return LFFeedFilteringEnabled() || LFShortsFilteringEnabled();
+}
+
+/// The single decision both layers use. Anything not recognisable as a video is
+/// left untouched, so headers, chips and shelf titles keep working; a Shorts
+/// lockup follows the Shorts switch and everything else the feed switch.
+static BOOL LFShouldHideFeedItem(NSDictionary *info) {
+    if (!LFFilteringActive())
+        return NO;
+    if ([[info objectForKey:LFInfoVideoIds] count] == 0)
+        return NO;
+
+    BOOL enabled = [[info objectForKey:LFInfoIsShort] boolValue] ? LFShortsFilteringEnabled()
+                                                                 : LFFeedFilteringEnabled();
+    return enabled && LFShouldHideInfo(info);
 }
 
 static BOOL LFSubscriptionsLocked(void) {
@@ -77,23 +88,20 @@ static BOOL LFSubscriptionsLocked(void) {
         NSDictionary *info = LFInfoForRenderer(self, data);
         // A subscribe control is its own element; a video lockup that merely
         // mentions one must not be blanked.
-        if ([info[LFInfoVideoIds] count] == 0)
+        if ([[info objectForKey:LFInfoVideoIds] count] == 0)
             return [NSData data];
     }
 
-    if (!LFFeedFilteringEnabled() && !LFShortsFilteringEnabled())
+    if (!LFAnyFeedFilteringEnabled())
         return data;
 
+    // Only a single-video lockup is blanked wholesale; a shelf carries several
+    // videos and its items are separate elements that get filtered on their own.
     NSDictionary *info = LFInfoForRenderer(self, data);
     if (!LFInfoIsSingleVideoLockup(info))
         return data;
 
-    // A Shorts lockup follows the Shorts switch, everything else the feed switch.
-    BOOL enabled = [info[LFInfoIsShort] boolValue] ? LFShortsFilteringEnabled() : LFFeedFilteringEnabled();
-    if (enabled && LFShouldHideVideoInfo(info))
-        return [NSData data];
-
-    return data;
+    return LFShouldHideFeedItem(info) ? [NSData data] : data;
 }
 
 %end
@@ -128,7 +136,7 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
                 continue;
 
             NSDictionary *info = LFInfoFromNode(node);
-            BOOL hide = LFShouldHideVideoInfo(info);
+            BOOL hide = LFShouldHideFeedItem(info);
             BOOL wasHidden = objc_getAssociatedObject(cell, LFHiddenCellKey) != nil;
             if (!hide && !wasHidden)
                 continue; // never touch cells this tweak does not own
@@ -154,7 +162,7 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
 
 %new
 - (void)lfScheduleFiltering {
-    if (!LFFeedFilteringEnabled())
+    if (!LFAnyFeedFilteringEnabled())
         return;
     if (self.lfFilterScheduled || LFCollectionViewIsScrolling(self))
         return;
@@ -168,7 +176,7 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
         if (!strongSelf)
             return;
         strongSelf.lfFilterScheduled = NO;
-        if (!LFFeedFilteringEnabled())
+        if (!LFAnyFeedFilteringEnabled())
             return;
         LFFilterVisibleCells(strongSelf);
     });
@@ -213,7 +221,7 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
         return LFIsAllowedChannel(channelId) ? model : nil;
 
     NSDictionary *info = LFInfoFromNode(entry) ?: LFInfoFromElementRenderer(entry);
-    if ([info[LFInfoChannelIds] count] > 0 || [info[LFInfoChannelName] length] > 0)
+    if ([[info objectForKey:LFInfoChannelIds] count] > 0 || [[info objectForKey:LFInfoChannelName] length] > 0)
         return LFShouldHideInfo(info) ? nil : model;
 
     // Nothing identifiable: fall back to the strict-mode preference (spec §14).
@@ -251,35 +259,120 @@ static void LFFilterVisibleCells(YTAsyncCollectionView *collectionView) {
 
 #pragma mark - Networking
 
+// Two independent nets. The NSURLSession hooks catch anything that goes through
+// the standard task factories; the NSMutableURLRequest hooks catch the request
+// while it is still being built, which also covers request objects handed to a
+// networking stack we do not hook. Both only read headers — the single
+// exception is repointing a forbidden request at a dead address.
+
+static NSURL *LFBlockedURL(void) {
+    static NSURL *url;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ url = [NSURL URLWithString:@"https://127.0.0.1:1/uye-learning-filter-blocked"]; });
+    return url;
+}
+
+static void LFHandleOutgoingRequest(NSURLRequest *request) {
+    if (![request isKindOfClass:[NSURLRequest class]])
+        return;
+    [[LFSubscriptionSync sharedSync] captureRequest:request];
+    [[LFAccountGuard sharedGuard] noteRequest:request];
+}
+
+static BOOL LFRequestMustBeBlocked(NSURLRequest *request) {
+    if (![request isKindOfClass:[NSURLRequest class]])
+        return NO;
+    if (LFSubscriptionsLocked() && LFIsSubscriptionMutationURL(request.URL))
+        return YES;
+    return [[LFAccountGuard sharedGuard] shouldBlockRequest:request];
+}
+
 /// Points a request at a dead local address so the task fails immediately
-/// instead of reaching YouTube. Returning nil from these factory methods would
+/// instead of reaching YouTube. Returning nil from the task factories would
 /// crash callers that assume a task.
-static NSURLRequest *LFNeuteredRequest(NSURLRequest *request) {
+static NSURLRequest *LFInspectRequest(NSURLRequest *request) {
+    LFHandleOutgoingRequest(request);
+    if (!LFRequestMustBeBlocked(request))
+        return request;
+
     NSMutableURLRequest *blocked = [request mutableCopy];
-    blocked.URL = [NSURL URLWithString:@"https://127.0.0.1:1/uye-learning-filter-blocked"];
+    blocked.URL = LFBlockedURL();
     blocked.HTTPBody = nil;
     return blocked;
 }
 
-static NSURLRequest *LFInspectRequest(NSURLRequest *request) {
-    if (![request isKindOfClass:[NSURLRequest class]])
-        return request;
+/// Same check, applied to a request that is still being assembled. `field` is
+/// the header just written, or nil when the URL changed.
+static void LFInspectMutableRequest(NSMutableURLRequest *request, NSString *field) {
+    // Only the headers that carry an identity are worth looking at; anything
+    // else would mean walking the URL on every single header write.
+    if (field.length > 0 && [field caseInsensitiveCompare:@"Authorization"] != NSOrderedSame &&
+        [field caseInsensitiveCompare:@"Cookie"] != NSOrderedSame)
+        return;
 
-    [[LFSubscriptionSync sharedSync] captureRequest:request];
-    [[LFAccountGuard sharedGuard] noteRequest:request];
+    LFHandleOutgoingRequest(request);
+    if (!LFRequestMustBeBlocked(request))
+        return;
 
-    if (LFSubscriptionsLocked() && LFIsSubscriptionMutationURL(request.URL))
-        return LFNeuteredRequest(request);
-
-    if ([[LFAccountGuard sharedGuard] shouldBlockRequest:request])
-        return LFNeuteredRequest(request);
-
-    return request;
+    NSURL *blocked = LFBlockedURL();
+    if (![request.URL isEqual:blocked])
+        request.URL = blocked; // re-enters this function once, then settles
 }
 
 %group LFNetworking
 
+%hook NSMutableURLRequest
+
+- (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+    %orig;
+    LFInspectMutableRequest(self, field);
+}
+
+- (void)addValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+    %orig;
+    LFInspectMutableRequest(self, field);
+}
+
+- (void)setAllHTTPHeaderFields:(NSDictionary<NSString *, NSString *> *)fields {
+    %orig;
+    LFInspectMutableRequest(self, nil);
+}
+
+- (void)setURL:(NSURL *)URL {
+    %orig;
+    LFInspectMutableRequest(self, nil);
+}
+
+%end
+
 %hook NSURLSession
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+    return %orig(LFInspectRequest(request));
+}
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
+                            completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    return %orig(LFInspectRequest(request), completionHandler);
+}
+
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData {
+    return %orig(LFInspectRequest(request), bodyData);
+}
+
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request
+                                         fromData:(NSData *)bodyData
+                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    return %orig(LFInspectRequest(request), bodyData, completionHandler);
+}
+
+%end
+
+// NSURLSession is a class cluster: +sessionWithConfiguration: hands back
+// __NSURLSessionLocal, which overrides the task factories. Hooking only the
+// public class would miss every request. Hooking a class that does not exist is
+// a no-op, so this is safe on any iOS version.
+%hook __NSURLSessionLocal
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
     return %orig(LFInspectRequest(request));
