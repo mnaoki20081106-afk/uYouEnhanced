@@ -1,6 +1,5 @@
 #import "uYouPlus.h"
 #import "uYouPlusSettings.h"
-#import "LearningFilter.h"
 
 // Keys for "Copy settings" button (for: uYouEnhanced)
 NSArray *NSUserDefaultsCopyKeys = @[
@@ -40,10 +39,6 @@ NSArray *NSUserDefaultsCopyKeys = @[
     kHideChannelHeaderLinks, kiPhoneLayout, kBigYTMiniPlayer, 
     kReExplore, kAutoHideHomeBar, kHideSubscriptionsNotificationBadge, 
     kFixCasting, kNewSettingsUI, kFlex, kGoogleSigninFix,
-
-    // Learning Mode (subscriptions-only whitelist)
-    kLFEnabled, kLFStrictUnknown, kLFFilterFeeds, kLFFilterShorts,
-    kLFLockSubscriptions, kLFSingleAccount,
 
     // uYou 3.0.4 keys
     @"showedWelcomeVC", @"hideShortsTab", @"hideCreateTab", 

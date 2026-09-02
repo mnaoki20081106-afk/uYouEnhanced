@@ -204,17 +204,34 @@ BOOL LFIsSubscribedToChannel(NSString *channelId) {
     return [[LFSubscriptionStore sharedStore] isSubscribedToChannelId:channelId];
 }
 
+// The account's own channel, published here by the account guard rather than
+// read back out of it: this sits on the filter's hot path.
+static NSString *sOwnChannelId;
+
+void LFSetOwnChannel(NSString *channelId) {
+    @synchronized(LFSubscriptionStore.class) {
+        sOwnChannelId = [channelId copy];
+    }
+}
+
+BOOL LFIsOwnChannel(NSString *channelId) {
+    if (![channelId isKindOfClass:[NSString class]] || channelId.length == 0)
+        return NO;
+    @synchronized(LFSubscriptionStore.class) {
+        return sOwnChannelId.length > 0 && [sOwnChannelId isEqualToString:channelId];
+    }
+}
+
 BOOL LFIsAllowedChannel(NSString *channelId) {
     // The whole point of Learning Mode: allowed == subscribed (spec §4, §8).
-    return LFIsSubscribedToChannel(channelId);
+    // The account's own channel rides along so the "You" tab keeps working.
+    return LFIsSubscribedToChannel(channelId) || LFIsOwnChannel(channelId);
 }
 
 BOOL LFFilteringActive(void) {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    if (![defaults boolForKey:kLFEnabled])
-        return NO;
-    // Signed out / never synced: no whitelist exists, so Whitelist Mode cannot
-    // be applied at all (spec §9). Staying inert beats blanking the whole app.
+    // The only thing that can hold the filter back: signed out or never synced,
+    // where no whitelist exists so Whitelist Mode cannot be applied at all
+    // (spec §9). Staying inert beats blanking the whole app.
     return [[LFSubscriptionStore sharedStore] ready];
 }
 
@@ -244,12 +261,11 @@ BOOL LFShouldHideInfo(NSDictionary *info) {
         case LFDecisionAllow:
             return NO;
         case LFDecisionHide:
-            return YES;
         case LFDecisionUnknown:
-            break;
+            // Spec §14: never allow something through on a guess.
+            return YES;
     }
-    // Spec §14: never allow something through on a guess.
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kLFStrictUnknown];
+    return YES;
 }
 
 #pragma mark - Payload scanning
@@ -264,10 +280,12 @@ static NSUInteger const kLFMaxScannedBytes = 262144;
 // so the stack buffers below would become variable-length arrays.
 enum { kLFMaxIds = 64 };
 
-static NSSet<NSString *> *LFChannelIdSetFromBytes(const uint8_t *bytes, size_t length) {
+static NSSet<NSString *> *LFChannelIdSetFromBytes(const uint8_t *bytes, size_t length, BOOL *hasStrong) {
     LFScanChannelId found[kLFMaxIds];
     size_t strongCount = 0;
     size_t count = LFScanChannelIds(bytes, length, found, kLFMaxIds, &strongCount);
+    if (hasStrong)
+        *hasStrong = strongCount > 0;
     if (count == 0)
         return [NSSet set];
 
@@ -313,18 +331,24 @@ NSDictionary *LFInfoFromData(NSData *data) {
     }
 
     BOOL isShort = fromShortsPath || LFScanLooksLikeShorts(bytes, length);
-    NSSet<NSString *> *channelIds = LFChannelIdSetFromBytes(bytes, length);
+    BOOL hasStrong = NO;
+    NSSet<NSString *> *channelIds = LFChannelIdSetFromBytes(bytes, length, &hasStrong);
     if (videoIds.count == 0 && channelIds.count == 0)
         return nil;
 
-    return @{LFInfoVideoIds: [videoIds copy], LFInfoChannelIds: channelIds, LFInfoIsShort: @(isShort)};
+    return @{
+        LFInfoVideoIds: [videoIds copy],
+        LFInfoChannelIds: channelIds,
+        LFInfoIsShort: @(isShort),
+        LFInfoHasStrongChannelId: @(hasStrong)
+    };
 }
 
 
 NSSet<NSString *> *LFChannelIdsInData(NSData *data) {
     if (![data isKindOfClass:[NSData class]] || data.length == 0)
         return [NSSet set];
-    return LFChannelIdSetFromBytes(data.bytes, (size_t)MIN(data.length, (NSUInteger)8388608));
+    return LFChannelIdSetFromBytes(data.bytes, (size_t)MIN(data.length, (NSUInteger)8388608), NULL);
 }
 
 NSDictionary *LFInfoFromString(NSString *text) {
@@ -353,15 +377,25 @@ static NSDictionary *LFMergeInfo(NSDictionary *lhs, NSDictionary *rhs) {
     [merged setObject:[channelIds copy] forKey:LFInfoChannelIds];
     [merged setObject:@([[lhs objectForKey:LFInfoIsShort] boolValue] || [[rhs objectForKey:LFInfoIsShort] boolValue])
                 forKey:LFInfoIsShort];
+    [merged setObject:@([[lhs objectForKey:LFInfoHasStrongChannelId] boolValue] ||
+                        [[rhs objectForKey:LFInfoHasStrongChannelId] boolValue])
+                forKey:LFInfoHasStrongChannelId];
     NSString *name = [lhs objectForKey:LFInfoChannelName] ?: [rhs objectForKey:LFInfoChannelName];
     if (name)
         [merged setObject:name forKey:LFInfoChannelName];
     return [merged copy];
 }
 
-BOOL LFInfoIsSingleVideoLockup(NSDictionary *info) {
-    NSSet *videoIds = [info objectForKey:LFInfoVideoIds];
-    return [videoIds isKindOfClass:[NSSet class]] && videoIds.count == 1;
+BOOL LFInfoCarriesContent(NSDictionary *info) {
+    if ([[info objectForKey:LFInfoVideoIds] count] > 0)
+        return YES;
+
+    // A channel card — "explore other channels" and friends — names no video, so
+    // it has to be judged on its channel id alone. Only a protobuf-prefixed id
+    // counts here: an unprefixed one can be a chance hit inside a base64 token,
+    // and hiding chrome on the strength of that would be worse than a leak.
+    return [[info objectForKey:LFInfoChannelIds] count] > 0 &&
+           [[info objectForKey:LFInfoHasStrongChannelId] boolValue];
 }
 
 #pragma mark - Object extraction
@@ -481,8 +515,9 @@ static NSString *LFChannelNameFromObject(id object) {
 }
 
 /// Guards `-description` re-entrancy: the protobuf dump is only taken when the
-/// cheap binary scan came up short.
-static BOOL LFDescribing = NO;
+/// cheap binary scan came up short. Re-entrancy is per-thread, and layout runs
+/// on several, so this has to be thread-local rather than one shared flag.
+static __thread BOOL LFDescribing = NO;
 
 static NSDictionary *LFInfoFromRendererUncached(id renderer, NSData *payload) {
     NSDictionary *info = nil;
